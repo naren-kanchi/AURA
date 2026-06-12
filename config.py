@@ -60,7 +60,7 @@ LATENT_DIM      = 16    # Bottleneck: the latent fingerprint space
 DECODER_DIMS    = [32, 64]   # Mirror of encoder (symmetric reconstruction)
 
 AE_LEARNING_RATE = 1e-3
-AE_EPOCHS        = 30        # Enough for convergence on CICIDS2017 subset
+AE_EPOCHS        = 50       # Enough for convergence on CICIDS2017 subset
 AE_BATCH_SIZE    = 256
 
 # Contrastive negative-sampling margin (pushes attack embeddings away from

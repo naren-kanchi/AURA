@@ -36,6 +36,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Generator, List, Optional, Tuple
 
+
 import numpy as np
 import pandas as pd
 import torch
@@ -345,11 +346,11 @@ class CICIDSDataLoader:
         df = _strip_column_whitespace(df)
 
         # Identify feature columns (everything except Label)
-        if self._feature_cols is None:
-            all_cols = list(df.columns)
-            label_stripped = cfg.LABEL_COL.strip()
-            self._feature_cols = [c for c in all_cols if c != label_stripped]
-            logger.info(f"Discovered {len(self._feature_cols)} feature columns.")
+        # Always rediscover — different CSVs can have columns in different order
+        all_cols = list(df.columns)
+        label_stripped = cfg.LABEL_COL.strip()
+        self._feature_cols = [c for c in all_cols if c != label_stripped]
+        logger.info(f"Discovered {len(self._feature_cols)} feature columns.")
 
         df = _clean_infinities_and_nans(df, self._feature_cols)
         return df
@@ -517,3 +518,129 @@ if __name__ == "__main__":
             break
 
     print("\n✓ Data loader test passed.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FL Client Partition Loader
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps each org name to the CSV files it owns
+_CLIENT_CSV_MAP: Dict[str, List[str]] = {
+    "hospital":   ["Monday-WorkingHours.pcap_ISCX.csv"],
+    "bank":       ["Tuesday-WorkingHours.pcap_ISCX.csv"],
+    "university": ["Wednesday-workingHours.pcap_ISCX.csv"],
+    "isp":        [
+                    "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
+                    "Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv",
+                  ],
+    "retail":     [
+                    "Friday-WorkingHours-Morning.pcap_ISCX.csv",
+                    "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+                    "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
+                  ],
+}
+
+
+def load_client_partition(
+    client_id: str,
+    csv_dir: Path = cfg.CSV_DIR,
+    scaler: Optional[MinMaxScaler] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Load a real CICIDS2017 data partition for one FL client.
+    Returns (train_tensor, val_tensor) — BENIGN rows only, scaled.
+
+    Parameters
+    ----------
+    client_id : e.g. "org_hospital_1", "org_isp_4", "org_retail_5"
+    csv_dir   : path to the folder containing CICIDS2017 CSVs
+    scaler    : a pre-fitted MinMaxScaler. ALWAYS pass this in from
+                a shared scaler fitted once on Monday benign data.
+                If None, fits its own scaler (only safe for single-client use).
+
+    Returns
+    -------
+    (X_train, X_val) — float32 tensors shaped [N_train, 78] and [N_val, 78]
+    """
+    # ── Extract org key from client_id ───────────────────────────────────────
+    # "org_hospital_1" → "hospital"
+    # "org_isp_4"      → "isp"
+    # "org_retail_5"   → "retail"
+    parts = client_id.split("_")          # ["org", "hospital", "1"]
+    if len(parts) >= 2:
+        org_key = parts[1]                # always the second segment
+    else:
+        raise ValueError(f"Cannot parse org key from client_id: '{client_id}'")
+
+    csv_files = _CLIENT_CSV_MAP.get(org_key)
+    if csv_files is None:
+        raise ValueError(
+            f"No CSV mapping for org '{org_key}' (from client_id '{client_id}'). "
+            f"Valid orgs: {list(_CLIENT_CSV_MAP.keys())}"
+        )
+
+    loader = CICIDSDataLoader(csv_dir=csv_dir)
+
+    # ── Fit scaler if not provided ───────────────────────────────────────────
+    # WARNING: every client should share the SAME scaler fitted on Monday
+    # benign data. If each client fits its own scaler, feature ranges will
+    # differ across clients and FLTrust cosine scoring will be meaningless.
+    if scaler is None:
+        logger.warning(
+            f"[{client_id}] No shared scaler provided — fitting own scaler on "
+            f"Monday benign data. Pass a shared scaler for correct FL behaviour."
+        )
+        scaler = loader.fit_scaler()
+
+    # ── Load and filter each CSV ─────────────────────────────────────────────
+    label_col = cfg.LABEL_COL.strip()
+    all_frames = []
+
+    for csv_file in csv_files:
+        try:
+            df = loader._load_csv(csv_file)
+        except FileNotFoundError:
+            logger.warning(f"[{client_id}] CSV not found, skipping: {csv_file}")
+            continue
+
+        # Keep BENIGN rows only — attack rows must never enter AE training
+        benign_df = df[df[label_col].str.strip() == cfg.BENIGN_LABEL]
+
+        if len(benign_df) == 0:
+            logger.warning(f"[{client_id}] No benign rows found in {csv_file}!")
+            continue
+
+        # Use the feature columns discovered during _load_csv
+        feature_cols = loader._feature_cols
+        X = benign_df[feature_cols].values.astype(np.float32)
+
+        # Scale using the shared scaler — clips to [0,1] for unseen extremes
+        X = scaler.transform(X).clip(0, 1)
+        all_frames.append(X)
+
+        logger.info(
+            f"[{client_id}] {csv_file}: {len(benign_df)} benign rows loaded."
+        )
+
+    if not all_frames:
+        raise RuntimeError(
+            f"[{client_id}] No data loaded for org '{org_key}'. "
+            f"Check that CSV files exist in: {csv_dir}"
+        )
+
+    # ── Stack all frames and split 80/20 ─────────────────────────────────────
+    X_all = np.vstack(all_frames)           # shape: [N_total, 78]
+
+    # Shuffle before splitting so val set isn't just the last file's rows
+    rng = np.random.default_rng(seed=42)
+    rng.shuffle(X_all)
+
+    split = int(len(X_all) * 0.8)
+    X_train = torch.tensor(X_all[:split], dtype=torch.float32)
+    X_val   = torch.tensor(X_all[split:], dtype=torch.float32)
+
+    logger.info(
+        f"[{client_id}] Partition ready — "
+        f"train={len(X_train)}  val={len(X_val)}  features={X_train.shape[1]}"
+    )
+    return X_train, X_val
