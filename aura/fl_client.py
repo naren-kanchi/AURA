@@ -495,7 +495,7 @@ def create_mock_clients(
             attack_rows[:, 16:32] = torch.rand(n_attack, 16) * 0.4 + 0.6  # pkt size/throughput
             attack_rows[:, 32:]  = torch.rand(n_attack, feature_dim - 32) * 0.6 + 0.4  # IAT/app
             train_data[:n_attack] = attack_rows
-            logger.info(f"[{client_id}] Strong attack injection: {n_attack}/{n_samples} samples poisoned.")
+            logger.info(f"[{client_id}] Strong attack injection: {n_attack}/{n_samples} samples poisoned with {chosen_attack.upper()} signatures.")
 
         clients.append(AURAFlowerClient(client_id, train_data, val_data))
 
@@ -542,8 +542,7 @@ def start_client(
         attack_rows[:, [2, 3, 6]] = torch.rand(n_attack, 3) * 0.3 + 0.7   # in_bytes, in_pkts, tcp_flags
         attack_rows[:, [4, 5, 9]] = torch.rand(n_attack, 3) * 0.2 + 0.8   # out_bytes, out_pkts, flow_dur
         train_data[:n_attack] = attack_rows
-        logger.info(f"[{client_id}] Byzantine mode — poisoned data injected.")
-
+        logger.info(f"[{client_id}] Byzantine mode — {chosen_attack.upper()} poisoned data injected.")
     client = AURAFlowerClient(client_id, train_data, val_data)
 
     print(f"\n[{client_id}] Connecting to FL server at {server_address} …")
