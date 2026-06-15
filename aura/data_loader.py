@@ -163,12 +163,22 @@ class CICIDSDataLoader:
         df = pd.read_csv(path, nrows=n_rows, low_memory=False)
         df = _strip_column_whitespace(df)
 
-        # Identify feature columns (everything except Label)
         if self._feature_cols is None:
-            all_cols = list(df.columns)
-            label_stripped = cfg.LABEL_COL.strip()
-            self._feature_cols = [c for c in all_cols if c != label_stripped]
-            logger.info(f"Discovered {len(self._feature_cols)} feature columns.")
+            # Columns to exclude from feature set:
+            # - IP addresses (used for topology, not as features)
+            # - Port numbers (used for topology context)
+            # - Timestamps (absolute time, not statistical features)
+            # - Labels (target variables)
+            ignored_cols = {
+                'IPV4_SRC_ADDR', 'IPV4_DST_ADDR',
+                'L4_SRC_PORT', 'L4_DST_PORT',
+                'FLOW_START_MILLISECONDS', 'FLOW_END_MILLISECONDS',
+                'Label', 'Attack',
+                'src_ip', 'dst_ip',
+            }
+            label_c = cfg.LABEL_COL.strip()
+            self._feature_cols = [c for c in df.columns if c not in ignored_cols and c != label_c]
+            logger.info(f"Discovered {len(self._feature_cols)} statistical feature columns.")
 
         df = _clean_infinities_and_nans(df, self._feature_cols)
         return df

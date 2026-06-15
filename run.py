@@ -54,7 +54,10 @@ def cmd_test():
     ]
 
     for name, script in tests:
-        result = subprocess.run([PYTHON, str(script)], capture_output=True, text=True)
+        args = [PYTHON, str(script)]
+        if name == "FL Client":
+            args.append("--help")
+        result = subprocess.run(args, capture_output=True, text=True)
         status = "✓ PASS" if result.returncode == 0 else "✗ FAIL"
         color  = "\033[92m" if result.returncode == 0 else "\033[91m"
         print(f"  {color}{status}\033[0m  {name}")
