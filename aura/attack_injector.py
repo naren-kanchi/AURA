@@ -36,6 +36,7 @@ Usage
 """
 
 import logging
+import json
 import time
 from enum import Enum
 from typing import Dict, Optional
@@ -49,6 +50,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import config as cfg
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real Dataset Class Statistics — Lazy Loader
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CLASS_STATS_CACHE: Optional[dict] = None
+
+def _load_class_stats() -> Optional[dict]:
+    """Load saved per-class feature statistics. Returns None if not found."""
+    global _CLASS_STATS_CACHE
+    if _CLASS_STATS_CACHE is not None:
+        return _CLASS_STATS_CACHE
+    stats_path = Path(cfg.MODELS_DIR) / "attack_class_stats.json"
+    if not stats_path.exists():
+        logger.warning(
+            f"[INJECTOR] attack_class_stats.json not found at {stats_path}. "
+            "Run scripts/train_explainer.py to generate it. "
+            "Falling back to synthetic attack profiles."
+        )
+        return None
+    try:
+        _CLASS_STATS_CACHE = json.loads(stats_path.read_text())
+        logger.info(f"[INJECTOR] Loaded class stats for: {list(_CLASS_STATS_CACHE.keys())}")
+        return _CLASS_STATS_CACHE
+    except Exception as e:
+        logger.error(f"[INJECTOR] Failed to load class stats: {e}")
+        return None
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -311,6 +340,75 @@ ATTACK_PROFILES = {
     AttackType.BACKDOOR:         _backdoor_profile,
 }
 
+# Map AttackType → stats key used in attack_class_stats.json
+ATTACK_STATS_KEYS = {
+    AttackType.DDOS:             "ddos",
+    AttackType.PORT_SCAN:        "portscan",
+    AttackType.LATERAL_MOVEMENT: "lateral",
+    AttackType.EXFILTRATION:     "exfil",
+    AttackType.WEB_ATTACK:       "web",
+    AttackType.EXPLOITS:         "exploits",
+    AttackType.FUZZERS:          "fuzzers",
+    AttackType.BACKDOOR:         "backdoor",
+}
+
+
+def _realistic_profile(stats_key: str, n: int, f: int) -> np.ndarray:
+    """
+    Sample n feature vectors from the real NF-UNSW-NB15 distribution for the
+    given attack class.  Uses truncated-normal sampling within [p05, p95] to
+    stay on the real data manifold, ensuring AE residuals match the RF training
+    distribution and giving accurate attack classification.
+
+    Falls back to the synthetic profile function if stats are unavailable.
+    """
+    stats = _load_class_stats()
+    if stats is None or stats_key not in stats:
+        # Fallback already handled in inject() — this path shouldn't be reached
+        raise ValueError(f"No stats for key '{stats_key}'")
+
+    s = stats[stats_key]
+    mean = np.array(s["mean"], dtype=np.float32)
+    std  = np.array(s["std"],  dtype=np.float32)
+    p05  = np.array(s["p05"],  dtype=np.float32)
+    p95  = np.array(s["p95"],  dtype=np.float32)
+
+    # Clip std to avoid degenerate distributions
+    std = np.clip(std, 1e-4, None)
+
+    # Trim available features to model input dimension
+    f_avail = min(len(mean), f)
+
+    # Sample from normal, then clip to [p05, p95] to stay on the data manifold
+    samples = np.random.normal(
+        loc=mean[:f_avail], scale=std[:f_avail], size=(n, f_avail)
+    ).astype(np.float32)
+    samples = np.clip(samples, p05[:f_avail], p95[:f_avail])
+    samples = np.clip(samples, 0.0, 1.0)  # ensure [0,1] normalised range
+
+    # If model dim > available features, pad with benign baseline
+    if f_avail < f:
+        benign_stats = _load_class_stats()
+        if benign_stats and "benign" in benign_stats:
+            b_mean = np.array(benign_stats["benign"]["mean"], dtype=np.float32)
+            pad = np.tile(b_mean[f_avail:f], (n, 1)) if len(b_mean) > f_avail else \
+                  np.full((n, f - f_avail), 0.35, dtype=np.float32)
+        else:
+            pad = np.full((n, f - f_avail), 0.35, dtype=np.float32)
+        samples = np.concatenate([samples, pad], axis=1)
+
+    return samples
+
+
+def _benign_profile(n: int, f: int) -> np.ndarray:
+    """Generate realistic benign traffic from saved dataset stats."""
+    stats = _load_class_stats()
+    if stats is not None and "benign" in stats:
+        return _realistic_profile("benign", n, f)
+    # Fallback: normal traffic in middle of normalised range
+    return np.random.uniform(0.25, 0.55, (n, f)).astype(np.float32)
+
+
 
 class AttackInjector:
     """
@@ -354,7 +452,7 @@ class AttackInjector:
         Mutated graph_dict with attack traces in edge_attr + metadata
         """
         attack_enum = self._resolve_attack_type(attack_type)
-        profile_fn  = ATTACK_PROFILES[attack_enum]
+        stats_key = ATTACK_STATS_KEYS[attack_enum]
 
         if base_graph is None:
             base_graph = self._generate_healthy_graph()
@@ -364,8 +462,19 @@ class AttackInjector:
         n_attacked = n_attacked_edges or max(1, int(n_edges * 0.30))
         n_attacked = min(n_attacked, n_edges)
 
-        # Choose which edges to infect (first n_attacked for determinism in demo)
-        attack_features = profile_fn(n_attacked, self.feature_dim)
+        # Prefer realistic profiles from real dataset statistics
+        # so AE residuals match the RF training distribution → accurate classification
+        try:
+            if _load_class_stats() is not None:
+                attack_features = _realistic_profile(stats_key, n_attacked, self.feature_dim)
+            else:
+                profile_fn = ATTACK_PROFILES[attack_enum]
+                attack_features = profile_fn(n_attacked, self.feature_dim)
+        except Exception as _e:
+            logger.warning(f"[INJECTOR] Realistic profile failed ({_e}), using synthetic fallback")
+            profile_fn = ATTACK_PROFILES[attack_enum]
+            attack_features = profile_fn(n_attacked, self.feature_dim)
+
         edge_attr[:n_attacked] = torch.tensor(attack_features, dtype=torch.float32)
 
         # For lateral movement: rewire some edges to anomalous topology
@@ -408,9 +517,10 @@ class AttackInjector:
             yield self.inject(attack_type), i
 
     def _generate_healthy_graph(self) -> Dict:
-        """Generate a baseline healthy network graph."""
-        # Normal traffic: Gaussian centred at ~0.4 in normalised space
-        edge_attr  = torch.rand(self.num_edges, self.feature_dim) * 0.3 + 0.3
+        """Generate a baseline healthy network graph using realistic benign traffic stats."""
+        # Use realistic benign distribution from dataset stats when available
+        benign_features = _benign_profile(self.num_edges, self.feature_dim)
+        edge_attr  = torch.tensor(benign_features, dtype=torch.float32)
         edge_index = torch.randint(0, self.num_nodes, (2, self.num_edges))
 
         # Remove self-loops
@@ -433,6 +543,7 @@ class AttackInjector:
             "ttl_state":  {},
             "window_id":  f"HEALTHY_{int(time.time())}",
         }
+
 
     def _rewire_edges(
         self, edge_index: torch.Tensor, n_rewire: int

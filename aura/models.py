@@ -307,8 +307,8 @@ class FlowAutoencoder(nn.Module):
         """
         with torch.no_grad():
             x_hat, _ = self.forward(x)
-            # Mean absolute error per feature dimension [F]
-            feature_residuals = (x - x_hat).abs().mean(dim=0)   # [F]
+            # Max absolute error per feature dimension [F]
+            feature_residuals = (x - x_hat).abs().max(dim=0).values   # [F]
         return feature_residuals.cpu().numpy()
 
     def count_params(self) -> int:

@@ -60,6 +60,9 @@ import os
 import random
 from pathlib import Path
 
+# Force UTF-8 encoding for stdout to prevent UnicodeEncodeError on Windows
+sys.stdout.reconfigure(encoding='utf-8')
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT      = Path(__file__).parent
 PYTHON    = sys.executable

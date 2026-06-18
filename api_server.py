@@ -10,8 +10,13 @@ Frontend:    cd frontend && npm run dev
 import json
 import logging
 import time
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Force UTF-8 encoding for stdout to prevent crashes when printing emojis on Windows
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import numpy as np
 import torch
@@ -22,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config as cfg
 from aura.dashboard_service import DashboardService, THEME, ORG_PROFILES
 from aura.fl_dashboard_service import FLDashboardService
+from aura.client_state import ClientStateStore, ALL_CLIENTS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -158,8 +164,90 @@ def api_fl_server_run():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Custom injection (existing endpoints)
+# Per-Client Isolated State Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _get_client_store() -> ClientStateStore:
+    """Lazy-init: reuse the DashboardService engine/responder/injector."""
+    store = ClientStateStore.get()
+    if store is None:
+        svc = DashboardService.get()
+        store = ClientStateStore.create(
+            engine    = svc.engine,
+            responder = svc.responder,
+            injector  = svc.injector,
+        )
+    return store
+
+
+@app.route("/api/client-state", methods=["GET"])
+def api_client_state():
+    """Return isolated state for one client. ?client=hospital|bank|university|isp|retail"""
+    client_key = request.args.get("client", "hospital").lower().strip()
+    if client_key not in ALL_CLIENTS:
+        client_key = "hospital"
+    # Also return shared global state (models, blockchain, metrics)
+    svc   = DashboardService.get()
+    store = _get_client_store()
+    client_data = store.get_client_state(client_key)
+    global_state = svc.get_state()
+    # Merge: client-specific data overrides global timeline/alerts/topology
+    merged = {**global_state, **client_data}
+    # Keep nodes from the global service (they reflect the current graph)
+    merged["nodes"] = client_data.get("nodes") or global_state["nodes"]
+    return jsonify(merged)
+
+
+@app.route("/api/client-attack/<attack_type>", methods=["POST"])
+def api_client_attack(attack_type: str):
+    """Inject an attack targeted at a specific client."""
+    client_key = request.args.get("client", "hospital").lower().strip()
+    if client_key not in ALL_CLIENTS:
+        return jsonify({"error": f"Unknown client '{client_key}'"}), 400
+    valid = {"ddos", "portscan", "lateral", "exfil", "web", "exploits", "fuzzers", "backdoor"}
+    if attack_type not in valid:
+        return jsonify({"error": f"Unknown attack type '{attack_type}'"}), 400
+    store  = _get_client_store()
+    result = store.inject_attack(client_key, attack_type)
+    state  = store.get_client_state(client_key)
+    svc    = DashboardService.get()
+    return jsonify({"status": "ok", **result, "state": {**svc.get_state(), **state}})
+
+
+@app.route("/api/client-normal", methods=["POST"])
+def api_client_normal():
+    """Push one normal traffic tick for a specific client and clear attack state."""
+    client_key = request.args.get("client", "hospital").lower().strip()
+    if client_key not in ALL_CLIENTS:
+        return jsonify({"error": f"Unknown client '{client_key}'"}), 400
+    store = _get_client_store()
+    store.inject_normal(client_key)
+    state = store.get_client_state(client_key)
+    svc   = DashboardService.get()
+    return jsonify({"status": "ok", "state": {**svc.get_state(), **state}})
+
+
+@app.route("/api/client-clear", methods=["POST"])
+def api_client_clear():
+    """Clear logs for one or all clients."""
+    client_key = request.args.get("client", "").lower().strip()
+    store = _get_client_store()
+    if client_key and client_key in ALL_CLIENTS:
+        store.clear_client(client_key)
+    else:
+        store.clear_all()
+    svc = DashboardService.get()
+    svc.clear_logs()
+    return jsonify({"status": "ok", "state": svc.get_state()})
+
+
+@app.route("/api/clients/summary", methods=["GET"])
+def api_clients_summary():
+    """Return a summary row for all 5 clients (for the client switcher bar)."""
+    store = _get_client_store()
+    return jsonify(store.get_all_clients_summary())
+
+
 
 def _build_node_registry() -> list:
     nodes = []

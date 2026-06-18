@@ -31,9 +31,11 @@ THEME = {
 }
 
 ORGS = [
-    {"id": "org_hospital_1", "key": "hospital", "label": "Hospital", "net": "192.168.1.0/24", "icon": "🏥"},
-    {"id": "org_bank_2", "key": "bank", "label": "Bank", "net": "10.0.1.0/24", "icon": "🏦"},
-    {"id": "org_university_3", "key": "university", "label": "University", "net": "172.16.1.0/24", "icon": "🎓"},
+    {"id": "org_hospital_1",   "key": "hospital",   "label": "Hospital",   "net": "192.168.1.0/24", "icon": "🏥"},
+    {"id": "org_bank_2",       "key": "bank",       "label": "Bank",       "net": "10.0.1.0/24",    "icon": "🏦"},
+    {"id": "org_university_3", "key": "university", "label": "University", "net": "172.16.1.0/24",  "icon": "🎓"},
+    {"id": "org_isp_4",        "key": "isp",        "label": "ISP",        "net": "10.10.0.0/24",   "icon": "🌐"},
+    {"id": "org_retail_5",     "key": "retail",     "label": "Retail",     "net": "172.31.0.0/24",  "icon": "🛒"},
 ]
 
 PIPE_STEPS = [
@@ -124,7 +126,7 @@ class FLDashboardService:
                         trusted = r.get("fltrust_trusted_indices", [])
                         scores = r.get("trust_scores", {})
                         self.fltrust_scores_hist.append({"round": rnd, "scores": scores})
-                        self.fl_log.append(f"Round {rnd}: FLTrust trusted {len(trusted)}/3 clients")
+                        self.fl_log.append(f"Round {rnd}: FLTrust trusted {len(trusted)}/5 clients")
                         self.fl_log.append(f"Hash minted: {h[:24]}…")
                         self.hash_ledger.insert(0, {
                             "version": version,

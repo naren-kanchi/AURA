@@ -165,13 +165,13 @@ def main():
 
     # ── Step 1: Load labelled data ───────────────────────────────────────────
     print(f"\n{'='*60}")
-    print("  AURA Explainer RF — Training Pipeline")
+    print("  AURA Explainer RF - Training Pipeline")
     print(f"{'='*60}\n")
-    print("[1/5] Loading NF-UNSW-NB15-v3 dataset …")
+    print("[1/5] Loading NF-UNSW-NB15-v3 dataset ...")
     X_scaled, y_labels, feature_cols = load_labelled_data(fraction=args.fraction)
 
     # ── Step 2: Load pre-trained autoencoder ─────────────────────────────────
-    print("[2/5] Loading pre-trained FlowAutoencoder …")
+    print("[2/5] Loading pre-trained FlowAutoencoder ...")
     ae = FlowAutoencoder()
 
     bundle_path = Path(args.model_path) if args.model_path else (
@@ -184,17 +184,17 @@ def main():
                 torch.load(str(bundle_path), map_location=device)
             )
             ae = bundle.autoencoder
-            print(f"  ✓ Loaded AE from {bundle_path}")
+            print(f"  [OK] Loaded AE from {bundle_path}")
         except Exception as e:
             logger.warning(f"Bundle load failed, using fresh AE: {e}")
-            print(f"  ⚠ Using untrained AE (bundle load failed: {e})")
+            print(f"  [WARN] Using untrained AE (bundle load failed: {e})")
     else:
-        print(f"  ⚠ No bundle found at {bundle_path} — using untrained AE")
+        print(f"  [WARN] No bundle found at {bundle_path} — using untrained AE")
 
     ae = ae.to(device).eval()
 
     # ── Step 3: Compute residuals |x - x̂| ───────────────────────────────────
-    print("[3/5] Computing residual vectors |x - x̂| …")
+    print("[3/5] Computing residual vectors |x - x_hat| ...")
     residuals = compute_residuals(ae, X_scaled)
     print(f"  Residual matrix shape: {residuals.shape}")
 
@@ -211,12 +211,12 @@ def main():
     print(f"  Attack classes: {np.unique(y_train).tolist()}")
 
     if len(X_train) == 0:
-        print("\n  ✗ No attack samples found — cannot train classifier.")
+        print("\n  [ERROR] No attack samples found — cannot train classifier.")
         print("    Ensure the dataset contains rows with Label=1 and an 'Attack' column.")
         sys.exit(1)
 
     # ── Step 5: Train RandomForestClassifier ─────────────────────────────────
-    print("[4/5] Training RandomForestClassifier …")
+    print("[4/5] Training RandomForestClassifier ...")
     clf = RandomForestClassifier(
         n_estimators=50,
         max_depth=10,
@@ -246,9 +246,85 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, str(output_path))
 
-    print(f"\n[5/5] ✓ Classifier saved: {output_path}")
+    print(f"\n[5/5] [OK] Classifier saved: {output_path}")
     print(f"  Classes:  {clf.classes_.tolist()}")
     print(f"  Features: {clf.n_features_in_}")
+
+    # ── Step 7: Save per-class feature statistics from SCALED X (not residuals)
+    # This enables the AttackInjector to sample realistic feature vectors that
+    # produce residuals in the same distribution as the training data, ensuring
+    # the RF classifier gives accurate predictions at inference time.
+    print("\n[6/6] Saving per-class feature statistics for realistic injection ...")
+
+    from aura.data_loader import CICIDSDataLoader, DATASET_PATH
+
+    loader2 = CICIDSDataLoader(load_fraction=args.fraction)
+    scaler2 = loader2.fit_scaler()
+    df2 = loader2._load_csv(str(DATASET_PATH))
+
+    label_col2 = "Label" if "Label" in df2.columns else cfg.LABEL_COL.strip()
+    attack_col2 = "Attack" if "Attack" in df2.columns else None
+    feature_cols2 = loader2._feature_cols
+
+    bin_labels2 = df2[label_col2].values
+    if attack_col2 is not None:
+        str_labels2 = df2[attack_col2].astype(str).str.strip().values
+    else:
+        str_labels2 = np.where(bin_labels2 == 0, "Benign", "Unknown")
+
+    is_benign2 = bin_labels2 == 0 if pd.api.types.is_numeric_dtype(df2[label_col2]) \
+        else (df2[label_col2].str.strip().str.upper() == "BENIGN").values
+    str_labels2[is_benign2] = "Benign"
+
+    X_all = df2[feature_cols2].values.astype(np.float32)
+    X_all_scaled = scaler2.transform(X_all).clip(0, 1)
+
+    # Build attack_class → NF column name mapping
+    # Map our injector attack keys to NF-UNSW-NB15 Attack column values
+    INJECTOR_TO_NF = {
+        "ddos":     ["DoS"],
+        "portscan": ["Reconnaissance"],
+        "lateral":  ["Backdoor"],          # closest available; Lateral not labelled separately
+        "exfil":    ["Backdoor"],          # data exfil; closest is Backdoor
+        "web":      ["Exploits", "Generic"],
+        "exploits": ["Exploits"],
+        "fuzzers":  ["Fuzzers"],
+        "backdoor": ["Backdoor"],
+    }
+
+    class_stats = {}
+    for inj_key, nf_classes in INJECTOR_TO_NF.items():
+        mask = np.isin(str_labels2, nf_classes)
+        X_cls = X_all_scaled[mask]
+        if len(X_cls) == 0:
+            continue
+        class_stats[inj_key] = {
+            "mean":  X_cls.mean(axis=0).tolist(),
+            "std":   X_cls.std(axis=0).tolist(),
+            "p05":   np.percentile(X_cls, 5,  axis=0).tolist(),
+            "p95":   np.percentile(X_cls, 95, axis=0).tolist(),
+            "n_samples": int(len(X_cls)),
+            "nf_classes": nf_classes,
+        }
+        print(f"  {inj_key:12s} -> {nf_classes}  ({len(X_cls)} samples)")
+
+    # Also save benign stats so non-targeted clients generate clean traffic
+    benign_mask = str_labels2 == "Benign"
+    X_benign = X_all_scaled[benign_mask]
+    class_stats["benign"] = {
+        "mean":  X_benign.mean(axis=0).tolist(),
+        "std":   X_benign.std(axis=0).tolist(),
+        "p05":   np.percentile(X_benign, 5,  axis=0).tolist(),
+        "p95":   np.percentile(X_benign, 95, axis=0).tolist(),
+        "n_samples": int(len(X_benign)),
+        "nf_classes": ["Benign"],
+    }
+
+    import json
+    stats_path = cfg.MODELS_DIR / "attack_class_stats.json"
+    stats_path.write_text(json.dumps(class_stats, indent=2))
+    print(f"  [OK] Class stats saved: {stats_path}")
+
     print(f"\n{'='*60}")
     print("  Explainer RF training complete!")
     print(f"{'='*60}\n")
@@ -256,3 +332,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

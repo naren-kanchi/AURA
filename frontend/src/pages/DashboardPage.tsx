@@ -1,38 +1,100 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { DashboardState } from '../types'
 import { THEME } from '../theme'
 import NetworkGraph from '../components/NetworkGraph'
 import ScoreTimeline from '../components/ScoreTimeline'
 
+// ─── 5 Federation clients ──────────────────────────────────────────────────────
+const CLIENTS = [
+  { key: 'hospital',   id: 'org_hospital_1',   label: 'Hospital',   icon: '🏥', net: '192.168.1.0/24', color: '#00cc6a' },
+  { key: 'bank',       id: 'org_bank_2',        label: 'Bank',       icon: '🏦', net: '10.0.1.0/24',   color: '#3b82f6' },
+  { key: 'university', id: 'org_university_3',  label: 'University', icon: '🎓', net: '172.16.1.0/24', color: '#a855f7' },
+  { key: 'isp',        id: 'org_isp_4',         label: 'ISP',        icon: '🌐', net: '10.10.0.0/24',  color: '#f59e0b' },
+  { key: 'retail',     id: 'org_retail_5',      label: 'Retail',     icon: '🛒', net: '172.31.0.0/24', color: '#ec4899' },
+]
+
 const ATTACKS = [
-  { label: 'DDoS', type: 'ddos' },
-  { label: 'Port Scan', type: 'portscan' },
-  { label: 'Lateral', type: 'lateral' },
-  { label: 'Exfil', type: 'exfil' },
-  { label: 'Web', type: 'web' },
+  { label: 'DDoS',      type: 'ddos',     icon: '🌊' },
+  { label: 'Port Scan', type: 'portscan', icon: '🔍' },
+  { label: 'Lateral',   type: 'lateral',  icon: '↔️' },
+  { label: 'Exfil',     type: 'exfil',    icon: '📤' },
+  { label: 'Web Atk',   type: 'web',      icon: '💉' },
 ]
 
 const REFRESH_MS = 1500
 
-export default function DashboardPage() {
-  const [state, setState] = useState<DashboardState | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState(false)
-  const [toast, setToast] = useState<string | null>(null)
-  const [customScript, setCustomScript] = useState('')
-  const [targetNode, setTargetNode] = useState('')
-  const [injectStatus, setInjectStatus] = useState('')
+// Severity colour helper
+function sevColor(sev?: string): string {
+  if (!sev) return THEME.dim
+  const s = String(sev).toUpperCase()
+  if (s === 'HIGH')   return '#f85149'
+  if (s === 'MEDIUM') return '#f97316'
+  if (s === 'LOW')    return THEME.yellow
+  return THEME.dim
+}
 
+// Group residuals bar
+function GroupResidualBars({ groups }: { groups: Record<string, number> }) {
+  const max = Math.max(...Object.values(groups), 0.001)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+      {Object.entries(groups).sort(([, a], [, b]) => b - a).map(([name, val]) => (
+        <div key={name} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.7rem' }}>
+          <span style={{ color: THEME.dim, width: 130, flexShrink: 0 }}>{name}</span>
+          <div style={{
+            height: 6, flex: 1, background: '#1a2a38', borderRadius: 3, overflow: 'hidden',
+          }}>
+            <div style={{
+              height: '100%',
+              width: `${Math.round((val / max) * 100)}%`,
+              background: `linear-gradient(90deg, ${THEME.cyan}, ${THEME.orange})`,
+              borderRadius: 3,
+              transition: 'width 0.4s ease',
+            }} />
+          </div>
+          <span style={{ color: THEME.text, width: 45, textAlign: 'right', fontFamily: 'monospace' }}>
+            {val.toFixed(4)}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  const [state,         setState]        = useState<DashboardState | null>(null)
+  const [globalState,   setGlobalState]  = useState<DashboardState | null>(null)
+  const [loading,       setLoading]      = useState(true)
+  const [busy,          setBusy]         = useState(false)
+  const [toast,         setToast]        = useState<string | null>(null)
+  const [customScript,  setCustomScript] = useState('')
+  const [targetNode,    setTargetNode]   = useState('')
+  const [injectStatus,  setInjectStatus] = useState('')
+  const [activeClient,  setActiveClient] = useState<string>('hospital')
+  const [clientSummary, setClientSummary] = useState<Record<string, { attack_active: boolean; ae_score: number; system_status: string }>>({})
+
+  const activeClientRef = useRef(activeClient)
+  activeClientRef.current = activeClient
+
+  // Fetch per-client state + global state + client summaries
   const refresh = useCallback(async () => {
     try {
-      const s = await api.getState()
-      setState(s)
-    } catch {
-      /* API may be starting */
-    } finally {
-      setLoading(false)
-    }
+      const [cs, gs, summaries] = await Promise.all([
+        api.getClientState(activeClientRef.current),
+        api.getState(),
+        api.getClientsSummary(),
+      ])
+      setState(cs)
+      setGlobalState(gs)
+      // Build client summary lookup
+      const lookup: Record<string, { attack_active: boolean; ae_score: number; system_status: string }> = {}
+      for (const s of summaries) {
+        lookup[s.key] = { attack_active: s.attack_active, ae_score: s.ae_score, system_status: s.system_status }
+      }
+      setClientSummary(lookup)
+    } catch { /* API may be starting */ }
+    finally { setLoading(false) }
   }, [])
 
   useEffect(() => {
@@ -40,6 +102,9 @@ export default function DashboardPage() {
     const id = setInterval(refresh, REFRESH_MS)
     return () => clearInterval(id)
   }, [refresh])
+
+  // Re-fetch immediately on client switch
+  useEffect(() => { refresh() }, [activeClient, refresh])
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -56,21 +121,19 @@ export default function DashboardPage() {
       showToast(e instanceof Error ? e.message : 'Action failed')
     } finally {
       setBusy(false)
+      await refresh()
     }
   }
 
   const handleAttack = (type: string, label: string) =>
-    runAction(() => api.injectAttack(type), `💥 ${label} injected!`)
+    runAction(() => api.injectClientAttack(type, activeClient), `💥 ${label} injected on ${activeClient.toUpperCase()}!`)
+
+  const handleNormal = () =>
+    runAction(() => api.injectClientNormal(activeClient), `✅ Normal traffic for ${activeClient.toUpperCase()}`)
 
   const handleCustomInject = async () => {
-    if (!targetNode) {
-      setInjectStatus('⚠ Please select a target node.')
-      return
-    }
-    if (!customScript.trim()) {
-      setInjectStatus('⚠ Script cannot be empty.')
-      return
-    }
+    if (!targetNode)          { setInjectStatus('⚠ Please select a target node.'); return }
+    if (!customScript.trim()) { setInjectStatus('⚠ Script cannot be empty.'); return }
     setBusy(true)
     setInjectStatus('Submitting…')
     try {
@@ -82,11 +145,17 @@ export default function DashboardPage() {
       setInjectStatus(`✗ ${e instanceof Error ? e.message : 'Failed'}`)
     } finally {
       setBusy(false)
+      await refresh()
     }
   }
 
   if (loading && !state) {
-    return <div style={{ padding: '2rem', color: THEME.dim }}>Loading AURA dashboard…</div>
+    return (
+      <div style={{ padding: '3rem', color: THEME.dim, textAlign: 'center' }}>
+        <div style={{ fontSize: '2rem', marginBottom: '1rem' }}>⚡</div>
+        <div>Initialising AURA…</div>
+      </div>
+    )
   }
 
   if (!state) {
@@ -97,123 +166,204 @@ export default function DashboardPage() {
     )
   }
 
-  const statusColor =
-    state.system_status === 'ACTIVE'
-      ? THEME.green
-      : state.system_status === 'UNDER ATTACK'
-        ? THEME.red
-        : THEME.yellow
-
-  const expl = state.last_explanation as Record<string, unknown> | null
+  const activeInfo    = CLIENTS.find(c => c.key === activeClient) ?? CLIENTS[0]
+  const isUnderAttack = (clientSummary[activeClient]?.system_status ?? state.system_status) === 'UNDER ATTACK'
+  const statusColor   = isUnderAttack ? THEME.red : THEME.green
+  const expl          = state.last_explanation as Record<string, unknown> | null
 
   return (
     <>
-      {/* Header */}
-      <div
-        className="panel"
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '1rem',
-        }}
-      >
-        <div>
-          <span style={{ fontSize: '1.4em', fontWeight: 'bold', color: THEME.cyan }}>🛡️ AURA</span>
-          <span style={{ color: THEME.dim, marginLeft: '0.5em', fontSize: '0.85em' }}>
-            Autonomous Unified Resilience Architecture
-          </span>
-          {state.org && (
-            <span
-              style={{
-                marginLeft: '0.8em',
-                background: `${state.org.color}22`,
-                border: `1px solid ${state.org.color}`,
-                borderRadius: 20,
-                padding: '2px 12px',
-                fontSize: '0.82em',
-                color: state.org.color,
-                fontWeight: 'bold',
-              }}
+      {/* ── Client Switcher Bar ─────────────────────────────────────────────── */}
+      <div className="client-bar">
+        <span className="client-bar-label">🖥 View Client</span>
+        {CLIENTS.map(c => {
+          const cs     = clientSummary[c.key]
+          const isAtk  = cs?.attack_active
+          const badge  = isAtk ? '🔴' : '🟢'
+          return (
+            <button
+              key={c.key}
+              data-org={c.key}
+              className={`client-btn ${activeClient === c.key ? 'active' : ''}`}
+              onClick={() => setActiveClient(c.key)}
+              title={`${c.label} — ${c.net}\nAE: ${cs?.ae_score?.toFixed(4) ?? '—'} | ${cs?.system_status ?? 'Loading'}`}
+              style={{ '--client-color': c.color } as React.CSSProperties}
             >
-              {state.org.icon} {state.org.label.toUpperCase()} · {state.org.net}
-            </span>
-          )}
+              <span style={{ fontSize: '0.7em', marginRight: 3 }}>{badge}</span>
+              {c.icon} {c.label}
+              {isAtk && (
+                <span style={{ marginLeft: 4, fontSize: '0.62em', color: THEME.red, fontWeight: 800 }}>ATK</span>
+              )}
+            </button>
+          )
+        })}
+        <div style={{
+          marginLeft: 'auto', padding: '0.3rem 0.85rem',
+          background: `${activeInfo.color}18`, border: `1px solid ${activeInfo.color}55`,
+          borderRadius: 20, fontSize: '0.72rem', color: activeInfo.color, fontWeight: 600,
+        }}>
+          {activeInfo.icon} {activeInfo.net}
+        </div>
+      </div>
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div className="header-panel" style={{ marginBottom: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <span style={{ fontSize: '1.4em', fontWeight: 800, color: THEME.cyan }} className="glow-cyan">
+            🛡️ AURA
+          </span>
+          <span style={{ color: THEME.dim, fontSize: '0.82em' }}>Autonomous Unified Resilience Architecture</span>
+          <span style={{
+            background: `${activeInfo.color}18`, border: `1px solid ${activeInfo.color}88`,
+            borderRadius: 20, padding: '3px 14px', fontSize: '0.78em',
+            color: activeInfo.color, fontWeight: 700,
+          }}>
+            {activeInfo.icon} {activeInfo.label.toUpperCase()} · {activeInfo.id}
+          </span>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <span style={{ color: statusColor, fontWeight: 'bold' }}>● {state.system_status}</span>
-          <span style={{ color: THEME.dim, marginLeft: '1em', fontSize: '0.75em' }}>
-            {state.model_status} | Blockchain: {state.blockchain_mode}
+          <span style={{ color: statusColor, fontWeight: 700 }}>
+            <span className="status-dot" style={{ backgroundColor: statusColor }} />
+            {isUnderAttack ? 'UNDER ATTACK' : 'ACTIVE'}
+          </span>
+          <span style={{ color: THEME.dim, marginLeft: '1em', fontSize: '0.73em' }}>
+            {globalState?.model_status ?? state.model_status} | Chain: {(globalState?.blockchain_mode ?? state.blockchain_mode)?.toUpperCase()}
           </span>
         </div>
       </div>
 
-      {/* Metrics */}
+      {/* ── Metrics Row ─────────────────────────────────────────────────────── */}
       <div className="grid-6" style={{ marginBottom: '1rem' }}>
-        {[
-          ['Windows Processed', state.metrics.window_counter],
-          ['Threats Detected', state.metrics.total_attacks],
-          ['Nodes Blocked', state.metrics.total_blocked],
-          ['FL Rounds', state.metrics.fl_rounds_done],
-          ['Chain Entries', state.metrics.chain_entries],
-          ['Current AE Score', state.metrics.current_ae_score.toFixed(4)],
-        ].map(([label, val]) => (
-          <div key={String(label)} className="metric-card">
+        {([
+          ['Windows',    state.metrics?.window_counter ?? 0,                THEME.cyan],
+          ['Threats',    state.metrics?.total_attacks  ?? 0,                THEME.red],
+          ['Blocked',    state.metrics?.total_blocked  ?? 0,                THEME.orange],
+          ['FL Rounds',  globalState?.metrics?.fl_rounds_done ?? 0,         THEME.blue],
+          ['Chain Logs', globalState?.metrics?.chain_entries  ?? 0,         '#a855f7'],
+          ['AE Score',   (state.metrics?.current_ae_score ?? 0).toFixed(4), THEME.green],
+        ] as [string, string | number, string][]).map(([label, val, col]) => (
+          <div key={label} className="metric-card">
             <div className="metric-label">{label}</div>
-            <div className="metric-value">{val}</div>
+            <div className="metric-value" style={{ color: col, fontSize: '1.35rem' }}>{val}</div>
           </div>
         ))}
       </div>
 
-      {/* Graph + Timeline */}
-      <div className="grid-2">
-        <div>
-          <h4 className="panel-title" style={{ color: THEME.cyan }}>🌐 Live Network Topology</h4>
+      {/* ── Network + Timeline ───────────────────────────────────────────────── */}
+      <div className="grid-2" style={{ marginBottom: '1rem' }}>
+        <div className="panel">
+          <h4 className="panel-title" style={{ color: THEME.cyan }}>
+            🌐 Network Topology — <span style={{ color: activeInfo.color }}>{activeInfo.label}</span>
+          </h4>
           <NetworkGraph nodes={state.nodes} edgeIndex={state.edge_index} />
-          <div style={{ fontSize: '0.75em', color: THEME.dim, marginTop: '0.25rem' }}>
-            <span style={{ color: THEME.green }}>◆ Normal</span> &nbsp;
-            <span style={{ color: THEME.yellow }}>◆ Evaluating</span> &nbsp;
-            <span style={{ color: THEME.red }}>◆ Threat Detected</span> &nbsp;
-            <span style={{ color: THEME.text }}>◇ Critical Infrastructure</span>
+          <div style={{ fontSize: '0.72em', color: THEME.dim, marginTop: '0.35rem', display: 'flex', gap: '1rem' }}>
+            <span style={{ color: THEME.green }}>◆ Normal</span>
+            <span style={{ color: THEME.yellow }}>◆ Evaluating</span>
+            <span style={{ color: THEME.red }}>◆ Threat</span>
           </div>
         </div>
-        <div>
-          <h4 className="panel-title" style={{ color: THEME.cyan }}>📈 Anomaly Score Timeline</h4>
-          <ScoreTimeline scores={state.timeline.scores} thresholds={state.timeline.thresholds} />
-          {state.ema.warmup_left > 0 ? (
-            <div style={{ fontSize: '0.8rem', color: THEME.blue, marginTop: '0.5rem' }}>
-              🔄 EMA calibrating… {state.ema.warmup_left} windows remaining
+        <div className="panel">
+          <h4 className="panel-title" style={{ color: THEME.cyan }}>
+            📈 Anomaly Score — <span style={{ color: activeInfo.color }}>{activeInfo.label}</span>
+          </h4>
+          <ScoreTimeline
+            scores={state.timeline?.scores ?? []}
+            thresholds={state.timeline?.thresholds ?? []}
+          />
+          {(state.ema?.warmup_left ?? 0) > 0 ? (
+            <div style={{ fontSize: '0.78rem', color: THEME.blue, marginTop: '0.5rem' }}>
+              🔄 EMA calibrating… {state.ema!.warmup_left} windows remaining
             </div>
           ) : (
-            <div style={{ fontSize: '0.75rem', color: THEME.dim, marginTop: '0.5rem' }}>
-              EMA μ={state.ema.mean.toFixed(4)} σ={state.ema.std.toFixed(4)} threshold=
-              {state.ema.threshold.toFixed(4)}
+            <div style={{ fontSize: '0.73rem', color: THEME.dim, marginTop: '0.4rem', fontFamily: 'monospace' }}>
+              μ={(state.ema?.mean ?? 0).toFixed(4)} · σ={(state.ema?.std ?? 0).toFixed(4)} · threshold={(state.ema?.threshold ?? 0).toFixed(4)}
             </div>
           )}
         </div>
       </div>
 
-      {/* Explanation panel */}
+      {/* ── AE Explanation Panel ─────────────────────────────────────────────── */}
       {expl && (
         <>
           <hr className="divider" />
-          <div className="panel">
-            <h4 className="panel-title" style={{ color: THEME.cyan }}>🔍 AE Explainability Panel</h4>
+          <div className="panel" style={{ marginBottom: '1rem', border: `1px solid ${sevColor(String(expl.severity ?? ''))}44` }}>
+            <h4 className="panel-title" style={{ color: THEME.orange }}>
+              🧠 AE Explainability — Why did the score spike on <span style={{ color: activeInfo.color }}>{activeInfo.label}</span>?
+            </h4>
+
+            {/* Row 1: inferred attack + severity */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '1rem', marginBottom: '0.75rem', alignItems: 'start' }}>
+              <div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 800, color: THEME.orange, marginBottom: '0.2rem' }}>
+                  {(expl.explanation as Record<string, string>)?.icon ?? '⚡'}{' '}
+                  {String(expl.inferred_attack)}
+                </div>
+                <div style={{ fontSize: '0.83rem', color: THEME.dim, marginBottom: '0.5rem' }}>
+                  {(expl.explanation as Record<string, string>)?.summary}
+                </div>
+                <div style={{ fontSize: '0.78rem', color: THEME.text, lineHeight: 1.5, marginBottom: '0.5rem' }}>
+                  {(expl.explanation as Record<string, string>)?.detail}
+                </div>
+                <div style={{
+                  fontSize: '0.76rem', color: THEME.cyan,
+                  background: '#0c1e30', borderRadius: 6, padding: '0.4rem 0.6rem',
+                  borderLeft: `3px solid ${THEME.cyan}`,
+                }}>
+                  <strong>Why these features?</strong>{' '}
+                  {(expl.explanation as Record<string, string>)?.why_high}
+                </div>
+              </div>
+              <div style={{ textAlign: 'right', minWidth: 160 }}>
+                <div style={{
+                  display: 'inline-block',
+                  padding: '0.4rem 1rem',
+                  borderRadius: 8,
+                  background: `${sevColor(String(expl.severity ?? ''))}22`,
+                  border: `1px solid ${sevColor(String(expl.severity ?? ''))}`,
+                  color: sevColor(String(expl.severity ?? '')),
+                  fontWeight: 800,
+                  fontSize: '1rem',
+                  marginBottom: '0.5rem',
+                }}>
+                  {String(expl.severity ?? 'LOW')}
+                </div>
+                <div style={{ fontSize: '0.78rem', color: THEME.dim }}>
+                  Confidence: <span style={{ color: THEME.text, fontWeight: 700 }}>
+                    {Number(expl.confidence ?? 0).toFixed(1)}%
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.78rem', color: THEME.dim, marginTop: '0.2rem' }}>
+                  RF Match: <span style={{ color: THEME.text, fontWeight: 700 }}>
+                    {(Number(expl.match_score ?? 0) * 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 2: group residuals + top features side by side */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
               <div>
-                <p style={{ color: THEME.orange, fontWeight: 600 }}>
-                  Inferred: {String(expl.inferred_attack)} ({Number(expl.match_score ?? 0).toFixed(1)}% match)
-                </p>
-                <p style={{ fontSize: '0.85rem', color: THEME.dim, marginTop: '0.5rem' }}>
-                  Severity: <span className={`sev-${expl.severity}`}>{String(expl.severity)}</span>
-                  {' · '}Confidence: {Number(expl.confidence ?? 0).toFixed(1)}%
-                </p>
+                <div style={{ fontSize: '0.72rem', color: THEME.dim, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.4rem', fontWeight: 700 }}>
+                  Feature Group Residuals
+                </div>
+                {expl.group_residuals && Object.keys(expl.group_residuals as object).length > 0 ? (
+                  <GroupResidualBars groups={expl.group_residuals as Record<string, number>} />
+                ) : (
+                  <span style={{ color: THEME.dim, fontSize: '0.76rem' }}>No group data.</span>
+                )}
               </div>
               <div>
-                <p style={{ fontSize: '0.8rem', color: THEME.dim, marginBottom: '0.35rem' }}>Top anomalous features:</p>
-                {(expl.top_features as [string, number, number][] | undefined)?.slice(0, 5).map(([name, val], i) => (
-                  <div key={i} style={{ fontSize: '0.78rem', fontFamily: 'monospace' }}>
-                    {name}: {Number(val).toFixed(4)}
+                <div style={{ fontSize: '0.72rem', color: THEME.dim, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.4rem', fontWeight: 700 }}>
+                  Top Anomalous Features
+                </div>
+                {(expl.top_features as [string, number, number][] | undefined)?.slice(0, 6).map(([name, val], i) => (
+                  <div key={i} style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    padding: '0.2rem 0', borderBottom: `1px solid ${THEME.border}44`,
+                    fontSize: '0.74rem',
+                  }}>
+                    <span style={{ color: THEME.cyan }}>{name}</span>
+                    <span style={{ color: THEME.text, fontFamily: 'monospace' }}>{Number(val).toFixed(4)}</span>
                   </div>
                 ))}
               </div>
@@ -224,25 +374,29 @@ export default function DashboardPage() {
 
       <hr className="divider" />
 
-      {/* Control panels */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 0.8fr', gap: '1rem' }}>
-        {/* Attack */}
-        <div className="panel">
-          <h4 className="panel-title" style={{ color: THEME.red }}>🔴 Attack Simulation</h4>
-          <div className="grid-3">
-            {ATTACKS.map((a) => (
+      {/* ── Control Panels ───────────────────────────────────────────────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 0.85fr', gap: '1rem', marginBottom: '1rem' }}>
+
+        {/* Attack Simulation — targeted at active client */}
+        <div className="panel" style={{ borderColor: THEME.red + '44' }}>
+          <h4 className="panel-title" style={{ color: THEME.red }}>
+            🔴 Attack Simulation →{' '}
+            <span style={{ color: activeInfo.color }}>{activeInfo.icon} {activeInfo.label}</span>
+          </h4>
+          <div className="grid-3" style={{ marginBottom: '0.75rem' }}>
+            {ATTACKS.map(a => (
               <button
                 key={a.type}
                 className="btn btn-danger"
                 disabled={busy}
                 onClick={() => handleAttack(a.type, a.label)}
               >
-                {a.label}
+                {a.icon} {a.label}
               </button>
             ))}
           </div>
-          <div style={{ marginTop: '0.75rem' }}>
-            <label style={{ fontSize: '0.72em', color: THEME.dim, textTransform: 'uppercase' }}>
+          <div>
+            <label style={{ fontSize: '0.7em', color: THEME.dim, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               ⚡ Custom Script Injection
             </label>
             <textarea
@@ -250,36 +404,52 @@ export default function DashboardPage() {
               placeholder="# Write your attack script here"
               value={customScript}
               onChange={(e) => setCustomScript(e.target.value)}
+              style={{ marginTop: '0.4rem' }}
             />
             <select className="node-select" value={targetNode} onChange={(e) => setTargetNode(e.target.value)}>
-              <option value="">Select target node</option>
-              {state.nodes.map((n) => (
+              <option value="">Select target node…</option>
+              {(state.nodes ?? []).map(n => (
                 <option key={n.id} value={n.id}>
-                  {n.id} — {n.label}
-                  {n.critical ? ' 🔑' : ''}
+                  {n.id} — {n.label}{n.critical ? ' 🔑' : ''}
                 </option>
               ))}
             </select>
-            <button className="btn btn-amber" style={{ width: '100%', marginTop: '0.5rem' }} disabled={busy} onClick={handleCustomInject}>
+            <button
+              className="btn btn-amber"
+              style={{ width: '100%', marginTop: '0.5rem' }}
+              disabled={busy}
+              onClick={handleCustomInject}
+            >
               ⚡ Inject Custom Script
             </button>
-            {injectStatus && <div style={{ marginTop: '0.4rem', fontSize: '0.75rem' }}>{injectStatus}</div>}
+            {injectStatus && (
+              <div style={{ marginTop: '0.4rem', fontSize: '0.73rem', color: THEME.yellow }}>{injectStatus}</div>
+            )}
           </div>
           <button
             className="btn"
             style={{ width: '100%', marginTop: '0.75rem', borderColor: THEME.green, color: THEME.green }}
             disabled={busy}
-            onClick={() => runAction(() => api.injectNormal(), '✅ Normal traffic processed')}
+            onClick={handleNormal}
           >
-            🟢 Generate Normal Traffic
+            🟢 Generate Normal Traffic for {activeInfo.label}
           </button>
         </div>
 
         {/* Federation */}
-        <div className="panel">
+        <div className="panel" style={{ borderColor: THEME.blue + '44' }}>
           <h4 className="panel-title" style={{ color: THEME.blue }}>🌐 Federation</h4>
+          <div style={{
+            background: `${activeInfo.color}12`, border: `1px solid ${activeInfo.color}33`,
+            borderRadius: 8, padding: '0.6rem 0.75rem', marginBottom: '0.75rem', fontSize: '0.78rem',
+          }}>
+            <div style={{ color: activeInfo.color, fontWeight: 700, marginBottom: '0.2rem' }}>
+              {activeInfo.icon} {activeInfo.label} Node
+            </div>
+            <div style={{ color: THEME.dim }}>{activeInfo.net} · {activeInfo.id}</div>
+          </div>
           {state.org && (
-            <div style={{ fontSize: '0.8rem', marginBottom: '0.5rem', color: state.under_attack ? THEME.red : THEME.dim }}>
+            <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem', color: state.under_attack ? THEME.red : THEME.dim }}>
               {state.under_attack ? '🚨 UNDER ATTACK — Quarantined' : state.fl_ready ? '✅ Ready for FL' : '⏸ Not ready'}
             </div>
           )}
@@ -291,11 +461,7 @@ export default function DashboardPage() {
                 </button>
               ) : (
                 <>
-                  <button
-                    className="btn"
-                    disabled={busy}
-                    onClick={() => runAction(() => api.setFlReady(!state.fl_ready))}
-                  >
+                  <button className="btn" disabled={busy} onClick={() => runAction(() => api.setFlReady(!state.fl_ready))}>
                     {state.fl_ready ? '⏸ Revoke FL Readiness' : '✅ Signal FL Ready'}
                   </button>
                   <button className="btn btn-danger" disabled={busy} onClick={() => runAction(() => api.setUnderAttack())}>
@@ -308,14 +474,14 @@ export default function DashboardPage() {
           <button
             className="btn btn-primary"
             style={{ width: '100%' }}
-            disabled={busy || state.fl_running}
-            onClick={() => runAction(() => api.runFederation(), 'Federation complete')}
+            disabled={busy || (globalState ?? state).fl_running}
+            onClick={() => runAction(() => api.runFederation(), '🚀 Federation complete')}
           >
-            {state.fl_running ? '⏳ Running FL…' : '🚀 Run FL Simulation'}
+            {(globalState ?? state).fl_running ? '⏳ Running FL…' : '🚀 Run FL Simulation (5 Clients)'}
           </button>
-          {state.fed_log.length > 0 && (
+          {(globalState ?? state).fed_log?.length > 0 && (
             <div className="log-list" style={{ marginTop: '0.75rem', color: THEME.blue }}>
-              {state.fed_log.map((line, i) => (
+              {(globalState ?? state).fed_log.map((line, i) => (
                 <div key={i} className="log-item">{line}</div>
               ))}
             </div>
@@ -323,11 +489,11 @@ export default function DashboardPage() {
         </div>
 
         {/* Blockchain */}
-        <div className="panel">
-          <h4 className="panel-title" style={{ color: THEME.cyan }}>⛓ Blockchain Audit</h4>
+        <div className="panel" style={{ borderColor: '#a855f755' }}>
+          <h4 className="panel-title" style={{ color: '#a855f7' }}>⛓ Blockchain Audit</h4>
           <button
             className="btn"
-            style={{ width: '100%', marginBottom: '0.5rem' }}
+            style={{ width: '100%', marginBottom: '0.5rem', borderColor: '#a855f7', color: '#a855f7' }}
             disabled={busy}
             onClick={() => runAction(() => api.registerHash(), 'Hash registered')}
           >
@@ -348,47 +514,56 @@ export default function DashboardPage() {
           >
             🔍 Verify Chain
           </button>
-          {state.chain_log.map((e, i) => (
-            <div key={i} className="log-item" style={{ fontFamily: 'monospace', fontSize: '0.74rem', color: THEME.cyan }}>
-              R{e.round} {e.version}: {e.hash.slice(0, 20)}… @ {e.time}
-            </div>
-          ))}
+          <div className="log-list">
+            {(globalState ?? state).chain_log?.length === 0 ? (
+              <span style={{ color: THEME.dim, fontSize: '0.78rem' }}>No hashes minted yet.</span>
+            ) : (globalState ?? state).chain_log?.map((e, i) => (
+              <div key={i} className="log-item" style={{ fontFamily: 'monospace', fontSize: '0.72rem', color: '#a855f7' }}>
+                R{e.round} {e.version}: {e.hash.slice(0, 20)}… @ {e.time}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
       <hr className="divider" />
 
-      {/* Logs */}
+      {/* ── Logs ──────────────────────────────────────────────────────────────── */}
       <div className="grid-2">
         <div className="panel">
-          <h4 className="panel-title" style={{ color: THEME.yellow }}>🔔 Alert History</h4>
-          {state.alerts.length === 0 ? (
-            <span style={{ color: THEME.dim }}>No alerts triggered yet.</span>
+          <h4 className="panel-title" style={{ color: THEME.yellow }}>
+            🔔 Alerts — <span style={{ color: activeInfo.color }}>{activeInfo.label}</span>
+          </h4>
+          {!state.alerts?.length ? (
+            <span style={{ color: THEME.dim, fontSize: '0.8rem' }}>No alerts triggered yet.</span>
           ) : (
             <div className="log-list">
               {state.alerts.map((a, i) => (
                 <div key={i} className="log-item">
-                  <span className={`sev-${a.severity}`}>{String(a.severity)}</span>
+                  <span style={{ color: sevColor(a.severity), fontWeight: 700 }}>{String(a.severity)}</span>
                   {' · '}
-                  {String(a.inferred_attack ?? a.tag ?? 'Alert')}
+                  <span style={{ color: THEME.orange }}>{String(a.inferred_attack ?? a.tag ?? 'Alert')}</span>
                   {' · MSE '}
-                  {Number(a.ae_score ?? 0).toFixed(4)}
+                  <span style={{ fontFamily: 'monospace' }}>{Number(a.ae_score ?? 0).toFixed(4)}</span>
                 </div>
               ))}
             </div>
           )}
         </div>
         <div className="panel">
-          <h4 className="panel-title" style={{ color: THEME.orange }}>🛡️ Response Actions</h4>
-          {state.incidents.length === 0 ? (
-            <span style={{ color: THEME.dim }}>No responses triggered yet.</span>
+          <h4 className="panel-title" style={{ color: THEME.orange }}>
+            🛡️ Response Actions — <span style={{ color: activeInfo.color }}>{activeInfo.label}</span>
+          </h4>
+          {!state.incidents?.length ? (
+            <span style={{ color: THEME.dim, fontSize: '0.8rem' }}>No responses triggered yet.</span>
           ) : (
             <div className="log-list">
               {state.incidents.map((r, i) => (
                 <div key={i} className="log-item">
-                  <strong>{String(r.action_taken)}</strong> → {String(r.node_id)} ({String(r.node_label)})
+                  <strong style={{ color: THEME.text }}>{String(r.action_taken)}</strong>
+                  {' → '}{String(r.node_id)} ({String(r.node_label)})
                   <br />
-                  <span style={{ color: THEME.dim, fontSize: '0.72rem' }}>{String(r.policy_reason)}</span>
+                  <span style={{ color: THEME.dim, fontSize: '0.7rem' }}>{String(r.policy_reason)}</span>
                 </div>
               ))}
             </div>
@@ -397,8 +572,10 @@ export default function DashboardPage() {
       </div>
 
       <div style={{ marginTop: '1rem', textAlign: 'right' }}>
-        <button className="btn" disabled={busy} onClick={() => runAction(() => api.clearLogs(), 'Logs cleared')}>
-          🗑️ Clear All Logs
+        <button className="btn" disabled={busy}
+          onClick={() => runAction(() => api.clearClientLogs(activeClient), 'Logs cleared')}
+        >
+          🗑️ Clear {activeInfo.label} Logs
         </button>
       </div>
 

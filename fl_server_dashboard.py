@@ -769,12 +769,12 @@ with _readiness_hdr_col:
 with _readiness_btn_col:
     st.button("🔄 Refresh", key="_refresh_readiness", use_container_width=True)
 
-_ORG_ICONS = {"hospital": "🏥", "bank": "🏦", "university": "🎓"}
+_ORG_ICONS = {"hospital": "🏥", "bank": "🏦", "university": "🎓", "isp": "🌐", "retail": "🛍"}
 _readiness_data  = _read_readiness()
 _byz_last        = st.session_state.get("byzantine_org")
 _quarantined_now = st.session_state.get("quarantined_orgs", [])
-_rd_cols = st.columns(3)
-for _ri, _org_k in enumerate(["hospital", "bank", "university"]):
+_rd_cols = st.columns(5)
+for _ri, _org_k in enumerate(["hospital", "bank", "university", "isp", "retail"]):
     _info         = _readiness_data.get(_org_k, {})
     _ready        = _info.get("ready", False)
     _is_quarantine= _info.get("under_attack", False)
@@ -833,7 +833,7 @@ st.markdown("---")
 # ── Client Cards Row ─────────────────────────────────────────────────────────
 st.markdown(f"<h4 style='color:{THEME['blue']}'>🖥 Participating Clients</h4>",
             unsafe_allow_html=True)
-card_cols = st.columns(3)
+card_cols = st.columns(5)
 card_placeholders = []
 for col in card_cols:
     card_placeholders.append(col.empty())
@@ -863,8 +863,9 @@ with btn_col:
 with info_col:
     st.markdown(
         f"<div style='color:{THEME['dim']}; font-size:0.82em; padding-top:0.6rem'>"
-        f"3 clients  ·  {rnd_total} rounds  ·  FLTrust (cosine trust vs server root)  "
-        f"·  1 blockchain mint (final round only)"
+        f"5 clients  ·  {rnd_total} rounds  ·  FLTrust (cosine trust vs server root)  "
+        f"·  1 blockchain mint (final round only)  "
+        f"·  Under-attack clients auto-quarantined and blocked from FL"
         f"</div>",
         unsafe_allow_html=True,
     )

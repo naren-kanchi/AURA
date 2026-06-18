@@ -16,6 +16,10 @@ import sys
 import subprocess
 from pathlib import Path
 
+# Force UTF-8 encoding for stdout to prevent UnicodeEncodeError on Windows
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 BASE = Path(__file__).parent
 PYTHON = sys.executable
 

@@ -6,21 +6,24 @@ export default function App() {
   return (
     <div className="app-layout">
       <aside className="sidebar">
-        <h3>⚙️ AURA Console</h3>
+        <div className="sidebar-brand">🛡️ AURA</div>
         <nav className="sidebar-nav">
           <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
-            🛡️ Operations Dashboard
+            🖥️ Operations Dashboard
           </NavLink>
           <NavLink to="/fl-server" className={({ isActive }) => (isActive ? 'active' : '')}>
             ⚙️ FL Server Console
           </NavLink>
         </nav>
         <hr className="divider" />
-        <div style={{ fontSize: '0.75rem', color: '#445566', lineHeight: 1.5 }}>
+        <div className="sidebar-info">
           <p><strong style={{ color: '#00ccff' }}>Layer 1</strong> — Flow Autoencoder</p>
           <p><strong style={{ color: '#00ccff' }}>Layer 2</strong> — GraphSAGE STGNN</p>
           <p><strong style={{ color: '#00ccff' }}>FL</strong> — FLTrust + Flower</p>
           <p><strong style={{ color: '#00ccff' }}>Audit</strong> — SHA-256 Ledger</p>
+          <div style={{ marginTop: '1.2rem', fontSize: '0.7rem', color: '#253856', letterSpacing: '0.04em' }}>
+            5 FEDERATED CLIENTS ACTIVE
+          </div>
         </div>
       </aside>
       <main className="main-content">

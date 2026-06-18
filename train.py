@@ -118,7 +118,7 @@ def train_autoencoder(
 
     # Load best model
     ae.load_state_dict(torch.load(cfg.MODELS_DIR / "autoencoder_best.pth"))
-    print(f"\n✓ Autoencoder training complete.  Best val loss: {best_val_loss:.5f}")
+    print(f"\n[OK] Autoencoder training complete.  Best val loss: {best_val_loss:.5f}")
     return ae
 
 
@@ -175,7 +175,7 @@ def train_stgnn(
             print(f"  Epoch {epoch:3d}/{epochs}  loss={epoch_loss/max(len(graphs), 1):.5f}")
 
     torch.save(gnn.state_dict(), cfg.MODELS_DIR / "stgnn_trained.pth")
-    print(f"✓ STGNN training complete.")
+    print(f"[OK] STGNN training complete.")
     return gnn
 
 
@@ -262,14 +262,14 @@ def main():
 
     bundle_path = cfg.MODELS_DIR / "aura_bundle.pth"
     torch.save(bundle.state_dict(), bundle_path)
-    print(f"\n✓ Full AURA bundle saved: {bundle_path}")
+    print(f"\n[OK] Full AURA bundle saved: {bundle_path}")
     print(f"  Total parameters: {bundle.total_params():,}")
 
     # ── Step 6: Save scaler for inference ────────────────────────────────────
     import joblib
     scaler_path = cfg.MODELS_DIR / "scaler.joblib"
     joblib.dump(scaler, scaler_path)
-    print(f"✓ Scaler saved: {scaler_path}")
+    print(f"[OK] Scaler saved: {scaler_path}")
 
     print(f"\n{'='*58}")
     print("  AURA Training Complete — Ready for inference and demo!")

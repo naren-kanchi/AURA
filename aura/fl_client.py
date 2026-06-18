@@ -486,6 +486,11 @@ def create_mock_clients(
                 client_id=client_id,
                 scaler=shared_scaler,
             )
+            # Limit samples to drastically speed up simulation
+            if len(train_data) > n_samples:
+                train_data = train_data[:n_samples]
+            if len(val_data) > (n_samples // 5):
+                val_data = val_data[:(n_samples // 5)]
         except (FileNotFoundError, RuntimeError, ValueError) as e:
             logger.warning(f"[{client_id}] Falling back to synthetic data: {e}")
             train_data = torch.rand(n_samples, feature_dim) * 0.3 + 0.35
