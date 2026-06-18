@@ -215,22 +215,26 @@ def main():
         print("    Ensure the dataset contains rows with Label=1 and an 'Attack' column.")
         sys.exit(1)
 
-    # ── Step 5: Train RandomForestClassifier ─────────────────────────────────
+# ── Step 5: Train RandomForestClassifier ─────────────────────────────────
     print("[4/5] Training RandomForestClassifier …")
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
     clf = RandomForestClassifier(
         n_estimators=50,
         max_depth=10,
         random_state=42,
         n_jobs=-1,
-        class_weight="balanced",  # handle class imbalance
+        class_weight="balanced",
     )
+
+    # Honest evaluation: every sample predicted by a model that never saw it
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    y_pred_cv = cross_val_predict(clf, X_train, y_train, cv=skf, n_jobs=-1)
+    print(f"\n  Cross-validated classification report (5-fold stratified):")
+    print(classification_report(y_train, y_pred_cv, zero_division=0))
+
+    # Fit on full data for the saved model (done AFTER reporting)
     clf.fit(X_train, y_train)
-
-    # Quick in-sample evaluation (full cross-val is overkill for this use case)
-    y_pred = clf.predict(X_train)
-    print(f"\n  In-sample classification report:")
-    print(classification_report(y_train, y_pred, zero_division=0))
-
     # Log feature importances (top 10)
     importances = clf.feature_importances_
     top_idx = np.argsort(importances)[::-1][:10]
