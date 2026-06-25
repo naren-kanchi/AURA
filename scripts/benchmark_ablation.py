@@ -482,7 +482,7 @@ def run_mode_d(ae: FlowAutoencoder, stgnn: AuraSTGNN, test_windows: list,
 
     for graph, edge_labels in test_windows:
         x = graph["x"].to(device)
-        edge_index = graph["edge_index"].to(device)
+        edge_index = graph["edge_index"].to(dvice)
         edge_attr = graph["edge_attr"].to(device)
         num_nodes = x.shape[0]
 
