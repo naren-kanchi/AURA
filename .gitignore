@@ -41,3 +41,9 @@ dataset/
 # React frontend
 frontend/node_modules/
 frontend/dist/
+
+# reports
+reports/
+
+#training 
+saved_models/
