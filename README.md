@@ -30,7 +30,7 @@ AURA addresses this through three core design choices:
 The repository is modularized for research reproducibility:
 
 *   **`Reproducibility.md`**: Strict chronological instructions for reproducing all paper artifacts.
-*   **`aura/`**: Core system implementation. Contains the `models.py` (Flow Autoencoder, STGNN), federated learning logic (`fl_server.py`, `fl_client.py`), and the DC-FLTrust aggregation strategy (`dc_fltrust_aggregate.py`).
+*   **`aura/`**: Core system implementation. Contains the `models.py` (Flow Autoencoder, STGNN), federated learning logic (`fl_server.py`, `fl_client.py`), and the DC-FLTrust aggregation strategy (`dc_fltrust_aggregate()` in `fl_server.py`).
 *   **`aura_attacks/`**: Forensic privacy evaluation modules. Contains `gradient_inversion_attack.py` (DLG) and `mia_attack.py` (Shadow-model based MIA).
 *   **`scripts/`**: Orchestration and benchmarking scripts (`benchmark_byzantine.py`, `dp_epsilon_sweep.py`, `generate_publication_artifacts.py`, `train_explainer.py`).
 *   **`dataset/`**: Expected directory for the target evaluation dataset (`NF-UNSW-NB15-v3.csv`).
@@ -75,9 +75,16 @@ The repository provides a strict, automated execution pipeline that mirrors the 
 ### 1. Training (State Preparation)
 Establish the canonical pre-trained initialization ($G_0$) and calculate dataset-derived thresholds.
 ```bash
-python train.py
-python calibrate_thresholds.py --train-quick
-python scripts/train_explainer.py
+python train.py                    # fits the feature preprocessor, trains AE + STGNN, writes saved_models/manifest.json
+python calibrate_thresholds.py     # thresholds from the held-out calibration split
+python scripts/train_explainer.py  # explainer + attack_class_stats.json from training flows
+python scripts/smoke_test.py       # wiring, leakage and manifest checks
+```
+The first run parses the CSV once into `cache/` (time-sorted flow table and feature matrices, ~2 GB). All scripts share one canonical, de-duplicated split (`aura/dataset.py`): test 20%, calibration 10%, server root 5%, training pool 65%. `TRAIN_DATA_FRACTION` in `config.py` subsamples the training pool only.
+
+### 1b. Baselines (go/no-go)
+```bash
+python scripts/baselines.py        # → results/baselines.json / .md
 ```
 
 ### 2. Federated Benchmark (Robustness)
@@ -126,7 +133,7 @@ If you build upon this work, please cite the repository:
 
 ```bibtex
 @misc{AURA2026,
-  title={AURA: Autonomous Unsupervised Response Architecture},
+  title={AURA: Adaptive Unified Resilient Architecture},
   author={...},
   year={2026},
   note={GitHub repository}
