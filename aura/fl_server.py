@@ -193,34 +193,33 @@ def _build_root_dataset(scaler, n_samples=5000):
         scaler: the SAME MinMaxScaler instance used for client data
         n_samples: number of flows to include (5000 recommended)
     """
+    from aura import dataset as ds
     from aura.split_manager import get_canonical_split
-    from aura.data_loader import CICIDSDataLoader
-    
-    loader = CICIDSDataLoader()
-    all_windows = list(loader.stream_graphs(scaler))
-    calib_windows, _, _, server_attack_windows = get_canonical_split(all_windows, test_fraction=0.20)
-    
-    # Extract benign flows from calibration windows only
-    all_flows = []
-    for graph, labels in calib_windows:
-        flows = graph['edge_attr']
-        benign_mask = labels == 0
-        if benign_mask.any():
-            all_flows.append(flows[benign_mask])
-        if sum(len(f) for f in all_flows) >= n_samples:
-            break
-    
-    if not all_flows:
-        raise RuntimeError(
-            "FATAL: Root dataset is empty. "
-            "Check that canonical training split contains benign flows."
-        )
-    
-    root_data = torch.cat(all_flows)[:n_samples]
-    print(f"[ROOT DATASET] Built from canonical training split: {len(root_data)} benign flows")
-    if scaler is not None:
-        print(f"[ROOT DATASET] Using shared scaler instance: {id(scaler)}")
+
+    # Root data comes from the server-root blocks of the canonical split, which
+    # are disjoint from (and de-duplicated against) every client's training data.
+    table = ds.load_flow_table()
+    split = ds.compute_split(table=table)
+    benign = split.benign_flows("root", table)
+    if len(benign) == 0:
+        raise RuntimeError("FATAL: Root dataset is empty — server-root split has no benign flows.")
+    rng = np.random.default_rng(cfg.SEED)
+    pick = np.sort(rng.choice(benign, size=min(n_samples, len(benign)), replace=False))
+    root_data = ds.flows_tensor(pick, scaler)
+
+    _, _, _, server_attack_windows = get_canonical_split(ds.WindowStore(scaler, table=table))
+    print(f"[ROOT DATASET] {len(root_data)} benign flows from the server-root split; "
+          f"{len(server_attack_windows)} attack-reserve windows")
     return root_data, server_attack_windows
+
+
+def _load_shared_scaler():
+    """
+    Return the preprocessor the pretrained bundle was trained with (saved by
+    train.py), so server root data and client data share its feature space.
+    """
+    from aura import dataset as ds
+    return ds.load_preprocessor()
 # ─────────────────────────────────────────────────────────────────────────────
 # FLTrust Aggregation (Upgrade 6 — active path in aggregate_fit; Krum is legacy fallback only)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -783,6 +782,7 @@ class KrumFedAURA(FedAvg):
         num_rounds:            int   = cfg.FL_NUM_ROUNDS,
         round_timeout_sec:     int   = cfg.FL_ROUND_TIMEOUT_SEC,
         merkle_tree=None,      # Optionally inject MerkleTree logger
+        scaler=None,           # Shared MinMaxScaler; defaults to saved_models/scaler.joblib
     ):
         # Configure FedAvg base (we override aggregation but keep its scheduling)
         super().__init__(
@@ -806,7 +806,11 @@ class KrumFedAURA(FedAvg):
 
         # FLTrust root dataset — generated once, reused every round.
         # This is the server's small trusted benign baseline.
-        self._root_data, self._server_attack_windows = _build_root_dataset()
+        if scaler is None:
+            scaler = _load_shared_scaler()
+        self._root_data, self._server_attack_windows = _build_root_dataset(
+            scaler, n_samples=cfg.FLTRUST_ROOT_SAMPLES
+        )
         # Global model reference — updated after each successful aggregation.
         # FLTrust needs the current global state to compute per-client deltas.
         self._global_model: AURAModelBundle = AURAModelBundle()
@@ -1208,9 +1212,7 @@ def run_federation_simulation(merkle_tree=None, n_rounds: int = None,
     else:
         attack_arg = -1
 
-    from aura.data_loader import CICIDSDataLoader
-    _shared_loader = CICIDSDataLoader()
-    _shared_scaler = _shared_loader.fit_scaler()
+    _shared_scaler = _load_shared_scaler()
 
     clients, attack_idx = create_mock_clients(
         n_clients     = len(active_orgs),
@@ -1220,7 +1222,8 @@ def run_federation_simulation(merkle_tree=None, n_rounds: int = None,
         shared_scaler = _shared_scaler,
     )
     strategy = KrumFedAURA(merkle_tree=merkle_tree,
-                           num_rounds=n_rounds)
+                           num_rounds=n_rounds,
+                           scaler=_shared_scaler)
 
     # Initialise with random global model
     global_model = AURAModelBundle()
