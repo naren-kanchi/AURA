@@ -451,10 +451,8 @@ def run_federation():
     st.session_state["fed_log"] = []
     st.session_state["fed_log"].append("🚀 Federation round initiated …")
 
-    bc_module = st.session_state["blockchain"]
-
     # Capture federation output by running the simulation
-    round_results = run_federation_simulation(blockchain_module=bc_module, n_rounds=3)
+    round_results = run_federation_simulation(n_rounds=3)
 
     for r in round_results:
         rnd     = r.get("round", "?")
