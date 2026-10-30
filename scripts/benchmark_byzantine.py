@@ -65,35 +65,20 @@ def initialize_benchmark_data():
     global _loader, _shared_scaler, server_attack_windows, _all_train_flows, _client_pool
     _loader = CICIDSDataLoader()
     try:
-        import joblib
-        import os
-        scaler_path = os.path.join(cfg.MODELS_DIR, "scaler.joblib")
-        if os.path.exists(scaler_path):
-            _shared_scaler = joblib.load(scaler_path)
-            logger.info("Loaded saved global dataset scaler.")
-        else:
-            _shared_scaler = _loader.fit_scaler()
-            logger.info("Global dataset scaler initialized successfully (fitted on fly).")
-        
+        from aura import dataset as ds
         from aura.split_manager import get_canonical_split
 
-        # Load all windows
-        all_windows = list(_loader.stream_graphs(_shared_scaler))
+        ds.check_manifest()
+        _shared_scaler = ds.load_preprocessor()
 
-        # Get canonical train/test split
-        calib_windows, train_windows, test_windows, server_attack_windows = get_canonical_split(
-            all_windows, test_fraction=0.20
-        )
-        
-        # CRITICAL: calibration_windows are a prefix of train_windows.
-        # To guarantee zero data leakage between the server's root dataset
-        # (built from calib_windows) and client training data, we must remove them.
-        train_windows = train_windows[len(calib_windows):]
+        # Server attack reserve (root blocks); the server's benign root data is
+        # built separately by _build_root_dataset() from the same root blocks.
+        _, _, _, server_attack_windows = get_canonical_split(_loader.stream_graphs(_shared_scaler))
 
-        # Extract ALL flows from train windows, randomised once for reproducibility
-        _all_train_flows = torch.cat([
-            graph['edge_attr'] for graph, labels in train_windows
-        ])
+        # Client data: de-duplicated TRAINING flows (natural benign/attack mix),
+        # disjoint from test, calibration and server-root flows by construction.
+        split = ds.compute_split()
+        _all_train_flows = ds.flows_tensor(split.flows["train"], _shared_scaler)
         _all_train_flows = _all_train_flows[torch.randperm(len(_all_train_flows))]
 
         # --- Privacy-preserving partition boundary ---
