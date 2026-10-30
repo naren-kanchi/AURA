@@ -1029,7 +1029,8 @@ class KrumFedAURA(FedAvg):
             entry = AuditEntry(
                 timestamp=datetime.utcnow().isoformat(),
                 round_num=server_round,
-                client_id=str(cp.cid),
+                # cp is None in run_federation_simulation (no ClientProxy in-process)
+                client_id=str(cp.cid) if cp is not None else str(fr.metrics.get("client_id", idx)),
                 ae_update_norm=0.0,  # Computed in dc_fltrust normally
                 head_update_norm=None,
                 local_val_accuracy=float(fr.metrics.get("val_accuracy", 0.0)),
