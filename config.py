@@ -54,14 +54,96 @@ LABEL_COL = "Label"
 # Label column is binary: 0 = Benign, 1 = Attack
 BENIGN_LABEL = 0
 
-# Fraction of data to load per CSV (1.0 = all rows; reduce for speed during dev)
-DATA_LOAD_FRACTION = 0.3   # 30 % is enough to demo; use 1.0 for full training
+SEED = 42   # Single seed for split, subsampling, IsolationForest and model init
 
-# Fraction of windows held out for test set in canonical split
-TEST_SPLIT_FRACTION = 0.20
+# ── Canonical split ──────────────────────────────────────────────────────────
+# The WHOLE dataset is always loaded and time-sorted. The timeline is cut into
+# contiguous blocks of SPLIT_BLOCK_WINDOWS windows, and whole blocks are assigned
+# (seeded, stratified by attack era) to four pairwise-disjoint sets. The test,
+# calibration and server-root sets never change with TRAIN_DATA_FRACTION.
+TEST_SPLIT_FRACTION   = 0.20   # held-out evaluation
+CALIB_SPLIT_FRACTION  = 0.10   # threshold calibration (never used for training)
+ROOT_SPLIT_FRACTION   = 0.05   # FLTrust server root: benign root data + attack reserve
+SPLIT_BLOCK_WINDOWS   = 200    # ~12k flows per block; keeps EMA-relevant runs contiguous
 
-# Fraction of train windows used for threshold calibration
-CALIB_SPLIT_FRACTION = 0.10
+# Portion of the TRAINING POOL used for training (seeded, stratified window
+# sample). 1.0 = the full pool. Test/calibration/root are unaffected.
+TRAIN_DATA_FRACTION = 0.3      # 0.3 for development, 1.0 for final paper runs
+DATA_LOAD_FRACTION  = TRAIN_DATA_FRACTION   # deprecated alias for older scripts
+
+# Parsed, time-sorted flow table and transformed feature matrices (memory-mapped)
+CACHE_DIR = BASE_DIR / "cache"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE SPECIFICATION (NF-UNSW-NB15-v3)
+# ─────────────────────────────────────────────────────────────────────────────
+# Measured on the full dataset (2026-10 audit):
+#   * MIN_TTL / MAX_TTL alone separate attacks with AUROC 0.998 (benign TTL=31,
+#     attacks 254/62) — a testbed artefact, so they are OFF for primary results.
+#   * DNS_QUERY_ID is a random transaction id (64k values) — pure noise.
+#   * ICMP_TYPE / ICMP_IPV4_TYPE are non-zero on 74% of non-ICMP flows (ICMP is
+#     0.017% of traffic) — an exporter artefact; PROTOCOL already marks ICMP.
+#   * 29/47 features scale below 0.01 under plain MinMax (heavy tails) → log1p.
+USE_TTL_FEATURES = False
+
+TTL_FEATURES      = ["MIN_TTL", "MAX_TTL"]
+DROPPED_FEATURES  = ["DNS_QUERY_ID", "ICMP_TYPE", "ICMP_IPV4_TYPE"]
+
+# TCP flag bitmasks (max value 31 in this dataset) → one binary feature per bit
+TCP_FLAG_FEATURES = ["TCP_FLAGS", "CLIENT_TCP_FLAGS", "SERVER_TCP_FLAGS"]
+TCP_FLAG_BITS     = {"fin": 1, "syn": 2, "rst": 4, "psh": 8, "ack": 16}
+
+# Categorical codes → one-hot over the listed values + an "other" column.
+# Vocabularies are the most frequent values in the dataset (coverage noted).
+CATEGORICAL_FEATURES = {
+    "PROTOCOL":             [6, 17, 89, 1],                         # 99.9%
+    "L7_PROTO":             [37.0, 36.0, 5.0, 11.0, 7.0, 0.0, 1.0, 92.0],  # 94.5%
+    "DNS_QUERY_TYPE":       [0, 1, 255, 28, 16],                    # 99.99%
+    "FTP_COMMAND_RET_CODE": [0, 229, 125, 230, 331],                # 98.0%
+}
+
+# Every other statistical column is continuous: log1p, then MinMax fitted on
+# training-pool benign flows. Identifiers and labels are never features.
+NON_FEATURE_COLUMNS = [
+    "IPV4_SRC_ADDR", "IPV4_DST_ADDR", "L4_SRC_PORT", "L4_DST_PORT",
+    "FLOW_START_MILLISECONDS", "FLOW_END_MILLISECONDS", "Label", "Attack",
+]
+CONTINUOUS_FEATURES = [
+    "IN_BYTES", "IN_PKTS", "OUT_BYTES", "OUT_PKTS",
+    "FLOW_DURATION_MILLISECONDS", "DURATION_IN", "DURATION_OUT",
+    "LONGEST_FLOW_PKT", "SHORTEST_FLOW_PKT", "MIN_IP_PKT_LEN", "MAX_IP_PKT_LEN",
+    "SRC_TO_DST_SECOND_BYTES", "DST_TO_SRC_SECOND_BYTES",
+    "RETRANSMITTED_IN_BYTES", "RETRANSMITTED_IN_PKTS",
+    "RETRANSMITTED_OUT_BYTES", "RETRANSMITTED_OUT_PKTS",
+    "SRC_TO_DST_AVG_THROUGHPUT", "DST_TO_SRC_AVG_THROUGHPUT",
+    "NUM_PKTS_UP_TO_128_BYTES", "NUM_PKTS_128_TO_256_BYTES",
+    "NUM_PKTS_256_TO_512_BYTES", "NUM_PKTS_512_TO_1024_BYTES",
+    "NUM_PKTS_1024_TO_1514_BYTES", "TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT",
+    "DNS_TTL_ANSWER",
+    "SRC_TO_DST_IAT_MIN", "SRC_TO_DST_IAT_MAX", "SRC_TO_DST_IAT_AVG", "SRC_TO_DST_IAT_STDDEV",
+    "DST_TO_SRC_IAT_MIN", "DST_TO_SRC_IAT_MAX", "DST_TO_SRC_IAT_AVG", "DST_TO_SRC_IAT_STDDEV",
+] + (TTL_FEATURES if USE_TTL_FEATURES else [])
+
+# Raw CSV columns the preprocessor reads (everything except identifiers/labels)
+RAW_FEATURE_COLUMNS = (
+    CONTINUOUS_FEATURES + TCP_FLAG_FEATURES + list(CATEGORICAL_FEATURES)
+)
+
+
+def _build_feature_names() -> list:
+    names = [c.lower() for c in CONTINUOUS_FEATURES]
+    for col in TCP_FLAG_FEATURES:
+        names += [f"{col.lower()}_{bit}" for bit in TCP_FLAG_BITS]
+    for col, vocab in CATEGORICAL_FEATURES.items():
+        names += [f"{col.lower()}_{v:g}" for v in vocab] + [f"{col.lower()}_other"]
+    return names
+
+
+# Model input columns, in order. FEATURE_DIM is derived — never hand-typed.
+FEATURE_NAMES = _build_feature_names()
+
+# Bump when the preprocessing changes so stale caches / manifests are rejected.
+PREPROCESSING_VERSION = 2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GRAPH / TTL EDGE DECAY
