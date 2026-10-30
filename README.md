@@ -109,13 +109,18 @@ python scripts/generate_publication_artifacts.py
 
 ## Results and Features
 
-Executing the pipeline populates the `results/` folder with complete forensic artifacts. Under the evaluated benchmark:
+> **Status: all results below are pending re-run.** An architecture audit (October 2026) found
+> evaluation defects that invalidate the artifacts currently in `results/`. The previous
+> artifacts and model checkpoints are preserved locally in `saved_models/pre_fix_backup/`.
+> Numbers will be restored here only after the corrected pipeline has been re-run.
 
-*   **Byzantine Robustness**: DC-FLTrust successfully distinguished Byzantine and honest client updates, achieving perfect detection under the evaluated benchmark configuration.
-*   **Privacy-Utility Tradeoff**: Differential privacy reduced the privacy budget monotonically as $\sigma$ increased. Utility dropped insignificantly ($F1 \approx 0.48$) while achieving mathematically rigorous privacy bounds ($\epsilon < 1.0$ at $\sigma=1.0$).
-*   **DLG Resistance**: Gradient inversion reconstruction quality remained poor under the evaluated attack configuration.
-*   **MIA Resistance**: MIA achieved an AUC near random guessing under the evaluated settings, suggesting that the H=32 bottleneck contributes to reduced membership inference success under the evaluated threat model.
-*   **MITM (Man-in-the-Middle)**: Simulated interception correctly triggers SHA-256 Merkle root validation failures during global broadcasting.
+Executing the pipeline populates the `results/` folder with JSON reports, CSV/markdown tables and figures. Claims under re-evaluation:
+
+*   **Byzantine Robustness** *(pending)*: DC-FLTrust's ability to separate Byzantine from honest clients. The previous benchmark ran a single configuration (5 clients, 1 Byzantine, 1 seed) without FedAvg/Krum/FLTrust baselines and did not persist its metrics; channel-2 classifier training and the deployed federation path also required fixes.
+*   **Privacy-Utility Tradeoff** *(pending)*: DP-SGD accounting is being corrected (sampling, composition across rounds, coverage of the AttackHead update). Previously reported ε values are not valid privacy bounds.
+*   **DLG Resistance** *(pending)*: requires a passing positive control (successful reconstruction without DP) before resistance can be claimed.
+*   **MIA Resistance** *(pending)*: the previous sweep attacked one fixed checkpoint for every σ, with member/non-member sets that did not match the victim's training data.
+*   **MITM (Man-in-the-Middle)** *(pending)*: client-side hash verification is being reworked so that rejection is driven by the hash comparison itself.
 
 ---
 
