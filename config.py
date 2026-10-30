@@ -159,7 +159,7 @@ EDGE_TTL_WINDOWS = 3
 # AUTOENCODER (Layer 1 — Statistical Tripwire)
 # ─────────────────────────────────────────────────────────────────────────────
 
-FEATURE_DIM     = 47    # Number of normalised NetFlow statistical features (NF-UNSW-NB15-v3)
+FEATURE_DIM     = len(FEATURE_NAMES)   # 76 without TTL, 78 with (see FEATURE SPECIFICATION)
 ENCODER_DIMS    = [32, 24]   # Progressive compression (smaller network for 47 features)
 LATENT_DIM      = 16    # Bottleneck: the latent fingerprint space
 DECODER_DIMS    = [24, 32]   # Mirror of encoder (symmetric reconstruction)
@@ -447,84 +447,13 @@ MITM_NOISE_STD: float = 0.01
 # CUSTOM INJECTION CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-# NetFlow feature index lookup — used by _run_inject_inference() in api_server.py
-# to resolve feature names to their column positions without hardcoding integers.
-# Derived from NF-UNSW-NB15-v3 schema (IPs, ports, timestamps, Label, Attack stripped).
-#
-# Feature column order (47 features, 0-indexed):
-#   0:  PROTOCOL                    1:  L7_PROTO
-#   2:  IN_BYTES                    3:  IN_PKTS
-#   4:  OUT_BYTES                   5:  OUT_PKTS
-#   6:  TCP_FLAGS                   7:  CLIENT_TCP_FLAGS
-#   8:  SERVER_TCP_FLAGS            9:  FLOW_DURATION_MILLISECONDS
-#  10:  DURATION_IN                11:  DURATION_OUT
-#  12:  MIN_TTL                    13:  MAX_TTL
-#  14:  LONGEST_FLOW_PKT           15:  SHORTEST_FLOW_PKT
-#  16:  MIN_IP_PKT_LEN             17:  MAX_IP_PKT_LEN
-#  18:  SRC_TO_DST_SECOND_BYTES    19:  DST_TO_SRC_SECOND_BYTES
-#  20:  RETRANSMITTED_IN_BYTES     21:  RETRANSMITTED_IN_PKTS
-#  22:  RETRANSMITTED_OUT_BYTES    23:  RETRANSMITTED_OUT_PKTS
-#  24:  SRC_TO_DST_AVG_THROUGHPUT  25:  DST_TO_SRC_AVG_THROUGHPUT
-#  26:  NUM_PKTS_UP_TO_128_BYTES   27:  NUM_PKTS_128_TO_256_BYTES
-#  28:  NUM_PKTS_256_TO_512_BYTES  29:  NUM_PKTS_512_TO_1024_BYTES
-#  30:  NUM_PKTS_1024_TO_1514_BYTES
-#  31:  TCP_WIN_MAX_IN             32:  TCP_WIN_MAX_OUT
-#  33:  ICMP_TYPE                  34:  ICMP_IPV4_TYPE
-#  35:  DNS_QUERY_ID               36:  DNS_QUERY_TYPE
-#  37:  DNS_TTL_ANSWER             38:  FTP_COMMAND_RET_CODE
-#  39:  SRC_TO_DST_IAT_MIN         40:  SRC_TO_DST_IAT_MAX
-#  41:  SRC_TO_DST_IAT_AVG         42:  SRC_TO_DST_IAT_STDDEV
-#  43:  DST_TO_SRC_IAT_MIN         44:  DST_TO_SRC_IAT_MAX
-#  45:  DST_TO_SRC_IAT_AVG         46:  DST_TO_SRC_IAT_STDDEV
-FEATURE_INDEX_MAP: dict = {
-    "protocol":                 0,
-    "l7_proto":                 1,
-    "in_bytes":                 2,
-    "in_pkts":                  3,
-    "out_bytes":                4,
-    "out_pkts":                 5,
-    "tcp_flags":                6,
-    "client_tcp_flags":         7,
-    "server_tcp_flags":         8,
-    "flow_duration":            9,
-    "duration_in":              10,
-    "duration_out":             11,
-    "min_ttl":                  12,
-    "max_ttl":                  13,
-    "longest_flow_pkt":         14,
-    "shortest_flow_pkt":        15,
-    "min_ip_pkt_len":           16,
-    "max_ip_pkt_len":           17,
-    "src_to_dst_second_bytes":  18,
-    "dst_to_src_second_bytes":  19,
-    "retransmitted_in_bytes":   20,
-    "retransmitted_in_pkts":    21,
-    "retransmitted_out_bytes":  22,
-    "retransmitted_out_pkts":   23,
-    "src_to_dst_avg_throughput": 24,
-    "dst_to_src_avg_throughput": 25,
-    "num_pkts_up_to_128_bytes": 26,
-    "num_pkts_128_to_256_bytes": 27,
-    "num_pkts_256_to_512_bytes": 28,
-    "num_pkts_512_to_1024_bytes": 29,
-    "num_pkts_1024_to_1514_bytes": 30,
-    "tcp_win_max_in":           31,
-    "tcp_win_max_out":          32,
-    "icmp_type":                33,
-    "icmp_ipv4_type":           34,
-    "dns_query_id":             35,
-    "dns_query_type":           36,
-    "dns_ttl_answer":           37,
-    "ftp_command_ret_code":     38,
-    "src_to_dst_iat_min":       39,
-    "src_to_dst_iat_max":       40,
-    "src_to_dst_iat_avg":       41,
-    "src_to_dst_iat_stddev":    42,
-    "dst_to_src_iat_min":       43,
-    "dst_to_src_iat_max":       44,
-    "dst_to_src_iat_avg":       45,
-    "dst_to_src_iat_stddev":    46,
-}
+# Feature name → model-input column index, generated from FEATURE_NAMES.
+# Used by api_server._run_inject_inference() and the attack-corruption profiles
+# to address features by name. Generated so it can never drift from the
+# preprocessor's actual column order.
+FEATURE_INDEX_MAP: dict = {name: i for i, name in enumerate(FEATURE_NAMES)}
+# Short alias used by the injection profiles
+FEATURE_INDEX_MAP["flow_duration"] = FEATURE_INDEX_MAP["flow_duration_milliseconds"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DYNAMIC AE THRESHOLD LOADER
@@ -827,6 +756,17 @@ def load_attack_corruption_profiles() -> dict:
             _cfg_log.warning(
                 f"[CONFIG] attack_class_stats.json missing p05/p95 for class '{stats_key}'. "
                 f"Using sentinel profile for '{profile_key}'."
+            )
+            profiles[profile_key] = _SENTINEL_ATTACK_PROFILES.get(profile_key, {})
+            continue
+
+        if len(p05) != FEATURE_DIM:
+            # Stats were written for a different feature layout; positional
+            # percentiles would be paired with the wrong feature names.
+            _cfg_log.warning(
+                f"[CONFIG] attack_class_stats.json has {len(p05)} features, model has "
+                f"{FEATURE_DIM}. Re-run scripts/train_explainer.py. Using sentinel "
+                f"profile for '{profile_key}'."
             )
             profiles[profile_key] = _SENTINEL_ATTACK_PROFILES.get(profile_key, {})
             continue
