@@ -410,6 +410,12 @@ def run_inference_tick(graph: dict, is_attack: bool = False):
         for nid in graph.get("attack_nodes", []):
             colors[nid] = THEME["yellow"]
             states[nid] = cfg.NODE_STATE_EVALUATING_SIMPLE
+
+        try:
+            from aura.ae_explainer import explain_ae, ATTACK_EXPLANATIONS
+            edge_attr = graph.get("edge_attr")
+            if edge_attr is not None:
+                feat_residuals = eng.ae.explain_features(edge_attr)
                 expl = explain_ae(feat_residuals)
                 st.session_state["last_explanation"] = {
                     "inferred_attack": expl["inferred_attack"],

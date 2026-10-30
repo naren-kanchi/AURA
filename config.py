@@ -314,6 +314,13 @@ IF_CONTAMINATION = 0.02   # 2 % — removes extreme statistical outliers
 # ─────────────────────────────────────────────────────────────────────────────
 
 DASHBOARD_REFRESH_INTERVAL_MS = 1500   # Streamlit auto-refresh period
+MAX_ALERTS_CACHE              = 30     # Alerts kept in the dashboard session
+MAX_INCIDENTS_CACHE           = 20     # Response incidents kept in the dashboard session
+PENDING_INJECT_FRESHNESS_SEC  = 30     # pending_inject.json older than this is ignored
+LAST_EXPLANATION_FRESHNESS_SEC = 30    # last_explanation.json older than this is ignored
+CUSTOM_INJECT_AE_THRESHOLD    = 0.3    # ae_threshold recorded on CUSTOM_INJECT events
+NODE_STATE_EVALUATING_SIMPLE  = "Evaluating…"
+NODE_STATE_EVALUATING_ICON    = "⚡ Evaluating…"
 ALERT_LOG_FILE = str(LOGS_DIR / "aura_alerts.jsonl")
 EVENT_LOG_FILE = str(LOGS_DIR / "aura_events.jsonl")
 
