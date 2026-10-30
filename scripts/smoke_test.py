@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+scripts/smoke_test.py — fast wiring check for the AURA pipeline
+================================================================
+Catches the class of breakage where a signature or module changes and an
+entry point silently stops working (e.g. a stale kwarg, a missing argument,
+a merge that leaves a file unparseable).
+
+Default checks need no dataset and run in seconds:
+  1. Every tracked .py file parses.
+  2. config.py imports on a fresh clone (no logs/calibration_results.json).
+  3. Core modules import.
+  4. Models, detector, two-pass local training and DC-FLTrust aggregation
+     run end-to-end on synthetic tensors.
+
+  --fl  additionally runs one real in-process federation round
+        (needs dataset/, saved_models/ and logs/calibration_results.json).
+
+Usage:
+    python scripts/smoke_test.py
+    python scripts/smoke_test.py --fl
+"""
+
+import argparse
+import ast
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+_failures = []
+
+
+def check(name, fn):
+    try:
+        fn()
+        print(f"  [PASS] {name}")
+    except Exception as e:
+        print(f"  [FAIL] {name}: {type(e).__name__}: {e}")
+        _failures.append(name)
+
+
+def parse_all_sources():
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.split()
+    bad = []
+    for rel in tracked:
+        try:
+            ast.parse((ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+        except SyntaxError as e:
+            bad.append(f"{rel}:{e.lineno}")
+    if bad:
+        raise SyntaxError(", ".join(bad))
+
+
+def fresh_clone_config_import():
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(ROOT / "config.py", tmp)
+        (Path(tmp) / "saved_models").mkdir()
+        shutil.copy(ROOT / "saved_models" / "attack_class_stats.json", Path(tmp) / "saved_models")
+        proc = subprocess.run(
+            [sys.executable, "-c", "import config; assert not config.CH2_SPLIT_CALIBRATED"],
+            cwd=tmp, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip().splitlines()[-1])
+
+
+def import_core_modules():
+    import importlib
+    for mod in ["config", "aura.models", "aura.data_loader", "aura.split_manager",
+                "aura.detector", "aura.local_training", "aura.root_gradient",
+                "aura.fl_client", "aura.fl_server", "aura.merkle_tree"]:
+        importlib.import_module(mod)
+
+
+def synthetic_pipeline():
+    import torch
+    import config as cfg
+    from aura.models import AURAModelBundle
+    from aura.detector import AURAInferenceEngine
+    from aura.local_training import run_two_pass_local_training
+    from aura.fl_server import dc_fltrust_aggregate
+
+    torch.manual_seed(0)
+    bundle = AURAModelBundle()
+    N, E, F = 20, 40, cfg.FEATURE_DIM
+
+    engine = AURAInferenceEngine(bundle.autoencoder, bundle.stgnn)
+    for i in range(cfg.EMA_WARMUP_BATCHES + 3):
+        engine.process({
+            "x": torch.rand(N, F), "edge_index": torch.randint(0, N, (2, E)),
+            "edge_attr": torch.rand(E, F), "window_id": f"smoke:w{i}",
+        })
+
+    def deltas():
+        ae, head = AURAModelBundle().autoencoder, AURAModelBundle().attack_head
+        g_ae = {k: v.clone() for k, v in ae.state_dict().items()}
+        g_head = {k: v.clone() for k, v in head.state_dict().items()}
+        _, _, _, _, export = run_two_pass_local_training(
+            ae, head, torch.rand(300, F),
+            torch.optim.Adam(ae.parameters(), lr=1e-3),
+            torch.optim.Adam(head.parameters(), lr=1e-3),
+            mse_threshold=cfg.CH2_MSE_SPLIT_THRESHOLD,
+        )
+        ae_d = {k: export[k] - g_ae[k] for k in g_ae}
+        head_d = {k: head.state_dict()[k] - g_head[k] for k in g_head}
+        return ae_d, head_d
+
+    clients = [deltas() for _ in range(3)]
+    root_ae, root_head = deltas()
+    dc_fltrust_aggregate(
+        [c[0] for c in clients], [c[1] for c in clients], root_ae, root_head,
+        client_round_counts=[1, 1, 1], ch2_warmup_rounds=cfg.CH2_WARMUP_ROUNDS,
+    )
+
+
+def split_is_leakage_free():
+    import numpy as np
+    from aura import dataset as ds
+    table = ds.load_flow_table()
+    dev, full = ds.compute_split(0.3, table), ds.compute_split(1.0, table)   # both run verify_split()
+    for name in ("test", "calib", "root"):
+        assert np.array_equal(dev.windows[name], full.windows[name]), \
+            f"{name} windows change with TRAIN_DATA_FRACTION"
+    covered = np.concatenate([full.windows[k] for k in ("test", "calib", "root", "train_pool")])
+    assert len(covered) == table.n_windows == len(np.unique(covered)), \
+        "split sets do not cover every window exactly once"
+    ds.compute_split(table=table)       # restore the configured split file
+
+
+def manifest_matches():
+    from aura import dataset as ds
+    if not ds.MANIFEST_FILE.exists():
+        raise FileNotFoundError("no manifest yet — run train.py")
+    ds.check_manifest()
+
+
+def one_federation_round():
+    from aura.fl_server import run_federation_simulation
+    results = run_federation_simulation(n_rounds=1)
+    assert results and results[0].get("model_hash"), "no aggregated model returned"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fl", action="store_true", help="also run one real federation round")
+    args = ap.parse_args()
+
+    print("AURA smoke test")
+    check("all tracked .py files parse", parse_all_sources)
+    check("config imports on a fresh clone", fresh_clone_config_import)
+    check("core modules import", import_core_modules)
+    check("synthetic models/detector/DC-FLTrust pipeline", synthetic_pipeline)
+    check("canonical split is leakage-free and fraction-invariant", split_is_leakage_free)
+    check("model artefacts match the manifest", manifest_matches)
+    if args.fl:
+        check("one in-process federation round", one_federation_round)
+
+    if _failures:
+        print(f"\n{len(_failures)} check(s) failed.")
+        sys.exit(1)
+    print("\nAll checks passed.")
+
+
+if __name__ == "__main__":
+    main()
