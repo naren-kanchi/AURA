@@ -525,17 +525,33 @@ _ae_thresh_high, _ae_thresh_medium, AE_THRESHOLDS_CALIBRATED = load_ae_threshold
 
 MSE_THRESHOLD_HIGH   = _ae_thresh_high    # EMA-UCL P99 of benign MSE distribution
 MSE_THRESHOLD_MEDIUM = _ae_thresh_medium  # EMA-UCL P90 of benign MSE distribution
-def load_ch2_split_threshold() -> float:
+
+# Sentinel CH2 split used ONLY before calibration has ever been run, for the
+# same bootstrap reason as _SENTINEL_THRESHOLD_* above (train.py and
+# calibrate_thresholds.py must be able to import config on a fresh clone).
+_SENTINEL_CH2_SPLIT_THRESHOLD = 0.01
+
+
+def load_ch2_split_threshold() -> tuple[float, bool]:
+    """
+    Load CH2_MSE_SPLIT_THRESHOLD from calibration_results.json.
+
+    Returns (threshold, calibrated). `calibrated` is False only when the
+    calibration file does not exist yet and the sentinel is returned.
+    DC-FLTrust entry points enforce calibration via preflight_dc_fltrust_check().
+    """
     if not _CALIB_JSON_PATH.exists():
-        raise FileNotFoundError(
-            f"Threshold calibration file missing: {_CALIB_JSON_PATH}. "
-            "Run calibrate_thresholds.py before starting the system."
+        _cfg_log.warning(
+            "[CONFIG] ⚠️  logs/calibration_results.json NOT FOUND. Using SENTINEL "
+            "CH2_MSE_SPLIT_THRESHOLD so config.py can be imported. Not valid for "
+            "federation or the paper. Run: `python calibrate_thresholds.py`."
         )
+        return _SENTINEL_CH2_SPLIT_THRESHOLD, False
     try:
         data = json.loads(_CALIB_JSON_PATH.read_text())
         if "CH2_MSE_SPLIT_THRESHOLD" not in data:
             raise KeyError("CH2_MSE_SPLIT_THRESHOLD missing from calibration file.")
-        return float(data["CH2_MSE_SPLIT_THRESHOLD"])
+        return float(data["CH2_MSE_SPLIT_THRESHOLD"]), True
     except Exception as e:
         raise ValueError(f"Failed to read CH2_MSE_SPLIT_THRESHOLD from calibration: {e}")
 
@@ -546,7 +562,7 @@ def load_ch2_split_threshold() -> float:
 # because we want AttackHead to see all suspicious flows, not just
 # the most extreme ones. Set to P75 of benign MSE distribution.
 # Updated automatically by calibrate_thresholds.py alongside other thresholds.
-CH2_MSE_SPLIT_THRESHOLD = load_ch2_split_threshold()
+CH2_MSE_SPLIT_THRESHOLD, CH2_SPLIT_CALIBRATED = load_ch2_split_threshold()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA-DRIVEN ATTACK CORRUPTION PROFILES
@@ -761,11 +777,17 @@ def preflight_dc_fltrust_check():
     from datetime import datetime
     
     stats_path = MODELS_DIR / "attack_class_stats.json"
-    
+
     if not stats_path.exists():
         raise RuntimeError(
             f"[PREFLIGHT FAIL] attack_class_stats.json missing at {stats_path}. "
             "Run train_explainer.py first."
+        )
+
+    if not (AE_THRESHOLDS_CALIBRATED and CH2_SPLIT_CALIBRATED):
+        raise RuntimeError(
+            f"[PREFLIGHT FAIL] {_CALIB_JSON_PATH} missing — AE / CH2 thresholds are "
+            "sentinel values. Run train.py then calibrate_thresholds.py first."
         )
     
     mtime = os.path.getmtime(stats_path)
