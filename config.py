@@ -277,9 +277,12 @@ FLTRUST_MIN_TRUST_SCORE = 0.0   # 0.0 = ReLU only (strict); raise to e.g. 0.05 t
 # ch1 disambiguation threshold for dc_fltrust_aggregate.
 # Clients with ch1 above this are treated as honest (HEALTHY or UNDER_ATTACK);
 # clients below it are treated as Byzantine.
-# Empirically: under H=32 optimization-horizon, honest clients converge to ch1 ~0.11.
-# Calibrated using 1st percentile of honest distribution (target 1% FPR).
+# PROVISIONAL: these three were calibrated before the shared round recipe
+# (aura/fl_round.py) and the 76-feature layout. Recalibrate from the honest-client
+# distribution before reporting detection results.
 FLTRUST_CH1_THRESHOLD = 0.0023
+CH2_ANTI_ALIGN_THRESHOLD = 0.12   # ch2 cosine below this: head update is adversarial
+CH2_UNDER_ATTACK_THRESHOLD = 0.5  # ch2 cosine above this: client is under real attack
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESPONSE ENGINE — Critical Infrastructure Allowlist

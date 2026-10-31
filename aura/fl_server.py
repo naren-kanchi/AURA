@@ -382,7 +382,7 @@ def dc_fltrust_aggregate(
     attack_ref_buffer = None,
     current_round: int = 0,
     reference_attack_head = None,
-    ch1_threshold: float = 0.25
+    ch1_threshold: float = cfg.FLTRUST_CH1_THRESHOLD
 ) -> tuple:
     """
     Dual-channel FLTrust aggregation.
@@ -502,22 +502,14 @@ def dc_fltrust_aggregate(
         ch2_raw_scores.append(ch2_raw)
 
         # ── Step 1: Explicit Boolean Predicates ──────────────────────────────────
-        # Calibrated using Mean - 6*std of honest distribution (0.65 - 6*0.088 = 0.12)
-        ANTI_ALIGN_THRESHOLD = 0.12
-
-        if ch2_raw == 'WARMUP':
-            is_warmup = True
-            is_ch1_adversarial = False
-            is_ch2_adversarial = False
-            is_under_attack = False
-            should_exclude = False
-        else:
-            is_warmup = False
-            is_ch1_adversarial = (ch1 <= ch1_threshold)
-            is_ch2_adversarial = (ch2_raw is not None) and (ch2_raw < ANTI_ALIGN_THRESHOLD)
-            is_under_attack = (ch2_raw is not None) and (ch2_raw > 0.5) and (not is_ch1_adversarial)
-            # The canonical decision rule:
-            should_exclude = is_ch1_adversarial or is_ch2_adversarial
+        # Channel 1 is always checked; warmup only skips channel 2.
+        is_warmup = (ch2_raw == 'WARMUP')
+        is_ch1_adversarial = (ch1 <= ch1_threshold)
+        ch2_active = isinstance(ch2_raw, float)
+        is_ch2_adversarial = ch2_active and (ch2_raw < cfg.CH2_ANTI_ALIGN_THRESHOLD)
+        is_under_attack = ch2_active and (ch2_raw > cfg.CH2_UNDER_ATTACK_THRESHOLD) and (not is_ch1_adversarial)
+        # The canonical decision rule:
+        should_exclude = is_ch1_adversarial or is_ch2_adversarial
 
         exclusion_flags.append(should_exclude)
         warmup_flags.append(is_warmup)
@@ -525,13 +517,13 @@ def dc_fltrust_aggregate(
 
         # ── Step 3: Pure Presentation Strings ────────────────────────────────────
         if is_warmup:
-            classification = 'WARMUP'
+            classification = 'WARMUP' if not is_ch1_adversarial else 'BYZANTINE'
         elif ch2_raw is None:
             classification = 'HEALTHY' if not is_ch1_adversarial else 'BYZANTINE'
         else:
-            if ch2_raw < ANTI_ALIGN_THRESHOLD:
+            if ch2_raw < cfg.CH2_ANTI_ALIGN_THRESHOLD:
                 classification = 'BYZANTINE_FAKE_ATTACK' if not is_ch1_adversarial else 'BYZANTINE'
-            elif ch2_raw > 0.5:
+            elif ch2_raw > cfg.CH2_UNDER_ATTACK_THRESHOLD:
                 classification = 'UNDER_ATTACK' if not is_ch1_adversarial else 'BYZANTINE_FAKE_ATTACK'
             else:
                 classification = 'HEALTHY' if not is_ch1_adversarial else 'BYZANTINE'
@@ -808,6 +800,11 @@ class KrumFedAURA(FedAvg):
             },
         )
         self.num_rounds        = num_rounds
+        if num_rounds < cfg.CH2_WARMUP_ROUNDS:
+            logger.warning(
+                f"[SERVER] {num_rounds} rounds never reaches CH2_WARMUP_ROUNDS="
+                f"{cfg.CH2_WARMUP_ROUNDS}: channel 2 stays off and the AttackHead is not federated."
+            )
         self.round_timeout_sec = round_timeout_sec
         self.audit_tree        = merkle_tree or __import__('aura.merkle_tree', fromlist=['']).MerkleTree()
         self._model_version    = 0
