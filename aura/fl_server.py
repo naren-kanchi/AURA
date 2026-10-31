@@ -460,48 +460,7 @@ def dc_fltrust_aggregate(
         client_flat = flatten(ae_delta)
         ch1 = relu_cosine(client_flat, root_ae_flat)
         
-        sim = signed_cosine(client_flat, root_ae_flat)
 
-        # ── Full instrumentation block ────────────────────────────────────────
-        _root_keys   = list(root_ae_delta.keys())
-        _client_keys = list(ae_delta.keys())
-        _keys_match  = _root_keys == _client_keys
-        _root_len    = sum(v.numel() for v in root_ae_delta.values())
-        _client_len  = sum(v.numel() for v in ae_delta.values())
-        _enc_params  = sum(v.numel() for k, v in ae_delta.items() if k.startswith('encoder'))
-        _dec_params  = sum(v.numel() for k, v in ae_delta.items() if k.startswith('decoder'))
-        _other       = sum(v.numel() for k, v in ae_delta.items()
-                           if not k.startswith('encoder') and not k.startswith('decoder'))
-        print(f"\n{'='*26}")
-        print(f"CLIENT {i}")
-        print(f"{'='*26}")
-        print(f"  Root  keys ({len(_root_keys)}):   {_root_keys}")
-        print(f"  Client keys ({len(_client_keys)}): {_client_keys}")
-        print(f"  Keys identical:        {_keys_match}")
-        print(f"  Root  flatten length:  {_root_len}")
-        print(f"  Client flatten length: {_client_len}")
-        print(f"  Root  norm:  {root_ae_flat.norm():.6f}")
-        print(f"  Client norm: {client_flat.norm():.6f}")
-        print(f"  Signed cosine:  {sim:.6f}")
-        print(f"  ReLU cosine:    {ch1:.6f}")
-        print(f"  Root dtype/device:   {root_ae_flat.dtype} / {root_ae_flat.device}")
-        print(f"  Client dtype/device: {client_flat.dtype} / {client_flat.device}")
-        print(f"  Param coverage -> encoder: {_enc_params}  decoder: {_dec_params}  other: {_other}")
-        print(f"  Root   first 10 vals: {root_ae_flat[:10].tolist()}")
-        print(f"  Client first 10 vals: {client_flat[:10].tolist()}")
-        # Save root and client[1] deltas once for offline cross-check
-        if i == 1:
-            import os, pickle
-            _save_path = os.path.join(os.path.dirname(__file__), '..', 'debug_deltas.pkl')
-            with open(_save_path, 'wb') as _f:
-                pickle.dump({'root_ae_delta': root_ae_delta,
-                             'client1_ae_delta': ae_delta}, _f)
-            print(f"  [SAVED] root_ae_delta + client[1] ae_delta -> debug_deltas.pkl")
-        # ── End instrumentation ───────────────────────────────────────────────
-        print(f"[DIAGNOSTIC] Client {i} gradient cosine with root: {sim:.4f}")
-        print(f"  Root grad norm: {root_ae_flat.norm():.4f}")
-        print(f"  Client grad norm: {client_flat.norm():.4f}")
-        print(f"  [CH1 CHECK] Client {i}: raw_signed={sim:.4f}  ch1_relu=max(0,raw)={ch1:.4f}")
 
         # Channel 2: gated by warmup
         if rounds >= ch2_warmup_rounds:
