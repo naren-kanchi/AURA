@@ -120,6 +120,54 @@ def synthetic_pipeline():
     )
 
 
+def dc_fltrust_safeguards():
+    import torch
+    from aura.fl_server import dc_fltrust_aggregate
+
+    torch.manual_seed(0)
+    root = {"w": torch.randn(200) * 0.01}
+    honest = [{"w": root["w"] + torch.randn(200) * 0.01} for _ in range(4)]
+    head = {"w": torch.zeros(4)}
+
+    # A client scaling its update x100 cannot move the model further than the root does
+    scaled = {"w": (0.3 * root["w"] + torch.randn(200) * 0.01) * 100}
+    agg = dc_fltrust_aggregate(honest + [scaled], [head] * 5, root, head, [1] * 5, current_round=1)[0]
+    assert agg["w"].norm() <= root["w"].norm() * 1.001, "scaled update was not bounded"
+
+    # Channel 1 still excludes during channel 2 warmup
+    reversed_client = {"w": -root["w"]}
+    out = dc_fltrust_aggregate(honest + [reversed_client], [head] * 5, root, head, [1] * 5, current_round=1)
+    assert out[5][4], "reversed client was not excluded during warmup"
+    assert not any(out[5][:4]), "honest client was excluded during warmup"
+
+
+def client_and_root_share_a_recipe():
+    import copy
+    import torch
+    import config as cfg
+    from aura import dataset as ds, fl_round
+
+    table, split = ds.load_flow_table(), ds.compute_split()
+    flows = ds.flows_tensor(split.benign_flows("train", table)[:12000])
+    model = fl_round.load_global_model()
+    g_ae, g_head = fl_round.snapshot(model.autoencoder), fl_round.snapshot(model.attack_head)
+
+    torch.manual_seed(cfg.SEED)
+    update = fl_round.client_update(model.autoencoder, model.attack_head, g_ae, g_head, flows)
+    # Building the root's model would consume random numbers and shift the batch
+    # shuffle, so reuse an already built one for this comparison.
+    build_ae, fl_round.FlowAutoencoder = fl_round.FlowAutoencoder, lambda: copy.deepcopy(model.autoencoder)
+    try:
+        torch.manual_seed(cfg.SEED)
+        root_ae, _ = fl_round.root_reference(g_ae, g_head, flows, torch.empty(0))
+    finally:
+        fl_round.FlowAutoencoder = build_ae
+    flat = lambda d: torch.cat([v.flatten() for v in d.values()])
+    gap = float((flat(update.ae_delta) - flat(root_ae)).abs().max())
+    assert gap < 1e-6, f"client and root AE updates differ by {gap} on identical data and seed"
+    assert flat(root_ae).norm() > 0, "root update is empty"
+
+
 def split_is_leakage_free():
     import numpy as np
     from aura import dataset as ds
@@ -157,8 +205,10 @@ def main():
     check("config imports on a fresh clone", fresh_clone_config_import)
     check("core modules import", import_core_modules)
     check("synthetic models/detector/DC-FLTrust pipeline", synthetic_pipeline)
+    check("DC-FLTrust bounds scaled updates and excludes during warmup", dc_fltrust_safeguards)
     check("canonical split is leakage-free and fraction-invariant", split_is_leakage_free)
     check("model artefacts match the manifest", manifest_matches)
+    check("client and server root follow the same training recipe", client_and_root_share_a_recipe)
     if args.fl:
         check("one in-process federation round", one_federation_round)
 
