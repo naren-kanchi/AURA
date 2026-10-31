@@ -495,8 +495,9 @@ class AURAFlowerClient(fl.client.Client):
             ae, head, self.train_data,
             ae_optimizer, head_optimizer,
             mse_threshold=mse_split,
-            head_epochs=3,
-            privacy_engine=privacy_engine
+            head_epochs=cfg.FL_HEAD_EPOCHS,
+            privacy_engine=privacy_engine,
+            local_epochs=self.local_epochs
         )
         
         assert n_benign > 0 or n_high_mse > 0, "FATAL: No flows processed in two-pass training"
