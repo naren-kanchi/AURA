@@ -240,6 +240,27 @@ def _retrain_reference_head(head, z_tensor, epochs=3):
         opt.step()
     head.eval()
 
+def _delta_norm(delta: dict) -> torch.Tensor:
+    return torch.cat([v.flatten().float() for v in delta.values()]).norm()
+
+
+def _scale_to_root(deltas: list, root_delta: dict) -> list:
+    """
+    FLTrust magnitude normalisation: rescale each update to the root update's norm.
+    Cosine trust ignores magnitude, so without this one client can dominate the
+    average just by scaling its update up.
+    """
+    root_norm = _delta_norm(root_delta)
+    scaled = []
+    for delta in deltas:
+        norm = None if delta is None else _delta_norm(delta)
+        if norm is None or norm == 0:
+            scaled.append(delta)
+        else:
+            scaled.append({k: v * (root_norm / norm) for k, v in delta.items()})
+    return scaled
+
+
 def ae_only_fltrust_aggregate(
     client_ae_deltas: list,
     root_ae_delta: dict,
@@ -270,17 +291,16 @@ def ae_only_fltrust_aggregate(
     
     # Normalize
     total = sum(trust_scores)
-    if total > 0:
-        normalized = [s / total for s in trust_scores]
-    else:
-        normalized = [1.0 / len(trust_scores)] * len(trust_scores)
-    
+    # All clients at zero trust: no update, as in FLTrust
+    normalized = [s / total if total > 0 else 0.0 for s in trust_scores]
+
     # Weighted aggregation
+    scaled_ae = _scale_to_root(client_ae_deltas, root_ae_delta)
     agg_ae = {
-        k: sum(w * d[k] for w, d in zip(normalized, client_ae_deltas))
-        for k in client_ae_deltas[0]
+        k: sum(w * d[k] for w, d in zip(normalized, scaled_ae))
+        for k in scaled_ae[0]
     }
-    
+
     return agg_ae, trust_scores
 
 
@@ -345,20 +365,19 @@ def joint_dual_fltrust_aggregate(
     
     # Normalize combined scores
     total = sum(combined_scores)
-    if total > 0:
-        normalized = [s / total for s in combined_scores]
-    else:
-        normalized = [1.0 / len(combined_scores)] * len(combined_scores)
-    
+    # All clients at zero trust: no update, as in FLTrust
+    normalized = [s / total if total > 0 else 0.0 for s in combined_scores]
+
     # Both channels aggregated with same combined weight
     # This is the flaw: corrupted head gradients enter aggregation
     # at the same weight as honest AE gradients
+    scaled_ae = _scale_to_root(client_ae_deltas, root_ae_delta)
     agg_ae = {
-        k: sum(w * d[k] for w, d in zip(normalized, client_ae_deltas))
-        for k in client_ae_deltas[0]
+        k: sum(w * d[k] for w, d in zip(normalized, scaled_ae))
+        for k in scaled_ae[0]
     }
-    
-    valid_heads = [(w, d) for w, d in zip(normalized, client_head_deltas)
+
+    valid_heads = [(w, d) for w, d in zip(normalized, _scale_to_root(client_head_deltas, root_head_delta))
                    if d is not None]
     if valid_heads:
         agg_head = {
@@ -583,12 +602,15 @@ def dc_fltrust_aggregate(
     if ch2_norm > 0:
         ch2_weights = ch2_weights / ch2_norm
     
-    # Weighted aggregation
-    agg_ae = {k: sum(w * d[k] for w, d in zip(ch1_weights, client_ae_deltas))
-              for k in client_ae_deltas[0]}
-    
+    # Weighted aggregation of updates rescaled to the root norm (scores are computed
+    # above on the raw updates; cosine is unaffected by scale)
+    scaled_ae = _scale_to_root(client_ae_deltas, root_ae_delta)
+    scaled_head = _scale_to_root(client_head_deltas, root_head_delta)
+    agg_ae = {k: sum(w * d[k] for w, d in zip(ch1_weights, scaled_ae))
+              for k in scaled_ae[0]}
+
     active_head_updates = [
-        (w, d) for w, d, excl, wrm in zip(ch2_weights, client_head_deltas, exclusion_flags, warmup_flags)
+        (w, d) for w, d, excl, wrm in zip(ch2_weights, scaled_head, exclusion_flags, warmup_flags)
         if not (excl or wrm) and d is not None
     ]
     
