@@ -227,6 +227,9 @@ FL_SERVER_ADDRESS   = "localhost:8080"
 FL_NUM_ROUNDS       = 3          # Federation rounds; final round hash is minted
 FL_MIN_CLIENTS      = 5          # All 5 org clients contribute each round
 FL_MIN_AVAILABLE    = 5          # All 5 orgs must be present before round 1
+FL_EXPORT_HORIZON   = 32         # H: the AE update is exported at this optimizer step
+FL_SIM_CLIENT_FLOWS = 12000      # Flows per simulated client: enough benign flows to reach H
+FL_HEAD_EPOCHS      = 3          # Full-batch AttackHead steps per round (client and server root)
 FL_LOCAL_EPOCHS     = 3          # Local AE training epochs per client per FL round (reduced for fast simulation)
 
 # Krum: number of clients to select per round (must be ≤ total clients - 2)

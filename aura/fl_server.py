@@ -784,8 +784,17 @@ class KrumFedAURA(FedAvg):
         merkle_tree=None,      # Optionally inject MerkleTree logger
         scaler=None,           # Shared MinMaxScaler; defaults to saved_models/scaler.joblib
     ):
+        # Global model reference (G0) — updated after each successful aggregation.
+        # Broadcast as the initial parameters so clients start from exactly the
+        # weights the server diffs their updates against.
+        from aura.fl_round import load_global_model
+        global_model = load_global_model()
+
         # Configure FedAvg base (we override aggregation but keep its scheduling)
         super().__init__(
+            initial_parameters    = ndarrays_to_parameters(
+                [p.detach().cpu().numpy() for p in get_federated_parameters(global_model)]
+            ),
             fraction_fit          = fraction_fit,
             fraction_evaluate     = fraction_evaluate,
             min_fit_clients       = min_fit_clients,
@@ -811,9 +820,9 @@ class KrumFedAURA(FedAvg):
         self._root_data, self._server_attack_windows = _build_root_dataset(
             scaler, n_samples=cfg.FLTRUST_ROOT_SAMPLES
         )
-        # Global model reference — updated after each successful aggregation.
-        # FLTrust needs the current global state to compute per-client deltas.
-        self._global_model: AURAModelBundle = AURAModelBundle()
+        from aura.root_gradient import attack_flows_from_windows
+        self._root_attack_flows = attack_flows_from_windows(self._server_attack_windows)
+        self._global_model: AURAModelBundle = global_model
 
         # Per-round trust score history (for dashboard + Upgrade 3 detection log)
         self._trust_history: List[dict] = []
@@ -887,97 +896,42 @@ class KrumFedAURA(FedAvg):
         # ── DC-FLTrust Aggregation ───────────────────────────────────────────
         print(f"\n{round_tag} Running DC-FLTrust aggregation on {n_received} updates …")
 
-        # Compute how many AE params the global model has
-        n_ae_params = len(list(self._global_model.autoencoder.parameters()))
+        from aura import fl_round
 
-        # Split each client's 16-tensor payload into AE (first 12) and Head (last 4)
-        global_ae_arrays = [p.detach().cpu().numpy()
-                            for p in self._global_model.autoencoder.parameters()]
-        global_head_arrays = [p.detach().cpu().numpy()
-                              for p in self._global_model.attack_head.parameters()]
+        global_ae = fl_round.snapshot(self._global_model.autoencoder)
+        global_head = fl_round.snapshot(self._global_model.attack_head)
+        ae_names, head_names = list(global_ae), list(global_head)
 
+        # Split each client's flat payload into AE and head deltas vs current global
         client_ae_deltas   = []
         client_head_deltas = []
         for arrays in client_updates:
-            ae_arrays   = arrays[:n_ae_params]
-            head_arrays = arrays[n_ae_params:]
-            # Compute deltas vs current global
-            ae_delta = {
-                f"layer_{i}": torch.tensor(c - g, dtype=torch.float32)
-                for i, (c, g) in enumerate(zip(ae_arrays, global_ae_arrays))
-            }
-            head_delta = {
-                f"layer_{i}": torch.tensor(c - g, dtype=torch.float32)
-                for i, (c, g) in enumerate(zip(head_arrays, global_head_arrays))
-            }
-            client_ae_deltas.append(ae_delta)
-            client_head_deltas.append(head_delta)
+            ae_arrays   = arrays[:len(ae_names)]
+            head_arrays = arrays[len(ae_names):]
+            client_ae_deltas.append({
+                k: torch.tensor(a, dtype=torch.float32) - global_ae[k]
+                for k, a in zip(ae_names, ae_arrays)
+            })
+            client_head_deltas.append({
+                k: torch.tensor(a, dtype=torch.float32) - global_head[k]
+                for k, a in zip(head_names, head_arrays)
+            })
 
-        # Compute server reference deltas (full-batch on root data)
-        server_model = AURAModelBundle()
-        with torch.no_grad():
-            for p, gp in zip(server_model.autoencoder.parameters(),
-                             self._global_model.autoencoder.parameters()):
-                p.copy_(gp)
-            for p, gp in zip(server_model.attack_head.parameters(),
-                             self._global_model.attack_head.parameters()):
-                p.copy_(gp)
-
-        ae_opt = torch.optim.Adam(server_model.autoencoder.parameters(),
-                                  lr=cfg.FLTRUST_SERVER_LR)
-        server_model.autoencoder.train()
-        ae_opt.zero_grad()
-        # Full-batch gradient — eliminates sampling noise at convergence
-        x_hat, _ = server_model.autoencoder(self._root_data)
-        loss = nn.functional.mse_loss(x_hat, self._root_data)
-        loss.backward()
-        ae_opt.step()
-        server_model.eval()
-
-        root_ae_delta = {
-            f"layer_{i}": (p.detach().cpu() - gp.detach().cpu()).float()
-            for i, (p, gp) in enumerate(zip(server_model.autoencoder.parameters(),
-                                            self._global_model.autoencoder.parameters()))
-        }
-        
-        # Compute root head delta using reserved attack flows
-        from aura.root_gradient import _build_root_head_reference
-        root_head_delta = _build_root_head_reference(
-            server_attack_windows=self._server_attack_windows,
-            ae=server_model.autoencoder,
-            global_head_weights={k: v.clone() for k, v in self._global_model.attack_head.state_dict().items()},
-            mse_threshold=getattr(cfg, 'CH2_MSE_SPLIT_THRESHOLD', cfg.MSE_THRESHOLD_HIGH),
-            server_lr=cfg.FLTRUST_SERVER_LR
+        root_ae_delta, root_head_delta = fl_round.root_reference(
+            global_ae, global_head, self._root_data, self._root_attack_flows
         )
 
-        client_round_counts = [server_round] * n_received
-
-        agg_ae_delta, agg_head_delta, ch1_scores, ch2_scores, classifications, exclusion_flags = dc_fltrust_aggregate(
-            client_ae_deltas=client_ae_deltas,
-            client_head_deltas = client_head_deltas,
-            root_ae_delta      = root_ae_delta,
-            root_head_delta    = root_head_delta,
-            client_round_counts = client_round_counts,
-            ch2_warmup_rounds  = cfg.CH2_WARMUP_ROUNDS,
-            current_round      = server_round,
+        agg_ae_delta, agg_head_delta, ch1_scores, ch2_scores, classifications, exclusion_flags = fl_round.aggregate(
+            client_ae_deltas, client_head_deltas, root_ae_delta, root_head_delta, server_round
         )
 
         # Apply deltas to global model to produce aggregated weight arrays
-        aggregated_ae = [
-            (gp.detach().cpu() + agg_ae_delta[f"layer_{i}"]).numpy().astype(np.float32)
-            for i, gp in enumerate(self._global_model.autoencoder.parameters())
-        ]
-        if agg_head_delta is not None:
-            aggregated_head = [
-                (gp.detach().cpu() + agg_head_delta[f"layer_{i}"]).numpy().astype(np.float32)
-                for i, gp in enumerate(self._global_model.attack_head.parameters())
-            ]
-        else:
-            # No head update this round — keep current global head weights
-            aggregated_head = global_head_arrays
+        new_ae = fl_round.apply_delta(global_ae, agg_ae_delta)
+        new_head = fl_round.apply_delta(global_head, agg_head_delta)
 
         # Recombine into a single flat list matching model_to_ndarrays layout
-        aggregated = aggregated_ae + aggregated_head
+        aggregated = [v.numpy().astype(np.float32)
+                      for v in list(new_ae.values()) + list(new_head.values())]
 
         # Map DC-FLTrust exclusion flags to flagged_indices for downstream logging
         flagged_indices = [
@@ -1216,7 +1170,7 @@ def run_federation_simulation(merkle_tree=None, n_rounds: int = None,
 
     clients, attack_idx = create_mock_clients(
         n_clients     = len(active_orgs),
-        n_samples     = 300,
+        n_samples     = cfg.FL_SIM_CLIENT_FLOWS,
         org_ids       = active_orgs,
         attack_client = attack_arg,
         shared_scaler = _shared_scaler,
@@ -1225,9 +1179,8 @@ def run_federation_simulation(merkle_tree=None, n_rounds: int = None,
                            num_rounds=n_rounds,
                            scaler=_shared_scaler)
 
-    # Initialise with random global model
-    global_model = AURAModelBundle()
-    global_params = [p.detach().cpu().numpy() for p in get_federated_parameters(global_model)]
+    # Clients start from the strategy's G0, the model it diffs their updates against
+    global_params = [p.detach().cpu().numpy() for p in get_federated_parameters(strategy._global_model)]
 
     round_results = []
 
